@@ -245,6 +245,20 @@ describe('evaluateDangerous — Write path rules', () => {
     expect(adviseMessage(r)).toContain('aws-credentials');
   });
 
+  // A8: Windows delivers native backslash paths; without normalization these credential
+  // overwrite notices never fire there.
+  test('C:\\Users\\me\\.aws\\credentials → advise (A8, Windows path)', () => {
+    const r = evaluateDangerous(writeCtx('C:\\Users\\me\\.aws\\credentials', '[default]'));
+    expect(r?.kind).toBe('advise');
+    expect(adviseMessage(r)).toContain('aws-credentials');
+  });
+
+  test('C:\\Users\\me\\.kube\\config → advise (A8, Windows path)', () => {
+    const r = evaluateDangerous(writeCtx('C:\\Users\\me\\.kube\\config', 'apiVersion: v1'));
+    expect(r?.kind).toBe('advise');
+    expect(adviseMessage(r)).toContain('kube-config');
+  });
+
   test('normal .ts file → null', () => {
     expect(evaluateDangerous(writeCtx('/proj/src/app.ts', 'const x = 1;'))).toBeNull();
   });
@@ -517,6 +531,26 @@ describe('Rosetta-AI-reviewed override — token detection (no # required)', () 
         file_path: 'schema.sql',
         old_string: 'DROP TABLE x; -- Rosetta-AI-reviewed',
         new_string: 'DROP TABLE x;',
+      },
+    };
+    expect(evaluateDangerous(ctx)).not.toBeNull();
+  });
+
+  // A9: MultiEdit must scan only `new_string`, mirroring Edit's whitelist boundary above.
+  // `old_string` is EXISTING file text an edit targets, not asserted content — a file that
+  // already contains the marker (e.g. this very patterns file, or a reviewed SQL migration)
+  // must not silently disable the soft-deny for an unrelated, unreviewed destructive edit later
+  // in the same MultiEdit call.
+  test('MultiEdit: marker ONLY in one edit.old_string (not new_string) → still denied (A9)', () => {
+    const ctx: HookContext = {
+      ide: 'claude-code', event: 'PreToolUse', toolKind: 'multi-edit',
+      toolName: 'MultiEdit', filePath: 'schema.sql', cwd: '/proj', sessionId: null,
+      toolInput: {
+        file_path: 'schema.sql',
+        edits: [
+          { old_string: 'existing text # Rosetta-AI-reviewed', new_string: 'unrelated rename' },
+          { old_string: 'b', new_string: 'DROP TABLE users;' },
+        ],
       },
     };
     expect(evaluateDangerous(ctx)).not.toBeNull();
