@@ -245,15 +245,23 @@ export class TerminalSession {
    * teardown finishes and the curion process exits) let the process exit before that
    * unref'd timer ever fired, dropping the escalation entirely and orphaning a
    * SIGTERM-ignoring agent. Awaiting this promise makes the escalation reliable.
+   *
+   * (F8) The PTY LEADER having already exited (`this.exited`) does NOT mean the whole
+   * process GROUP is gone — a backgrounded/`nohup`'d same-group subprocess the leader
+   * spawned before exiting can survive it, orphaned. So on POSIX this always signals
+   * the group (`-pid`), regardless of `this.exited`; only ESRCH (no such process/group)
+   * means "gone" — EPERM (exists, just not signalable) and any other error mean it is
+   * still there.
    */
   kill(): Promise<void> {
-    if (this.exited) return Promise.resolve();
     const pid = this.pty.pid;
     if (process.platform === 'win32' || !pid) {
-      try {
-        this.pty.kill();
-      } catch {
-        // Process already gone; ignore.
+      if (!this.exited) {
+        try {
+          this.pty.kill();
+        } catch {
+          // Process already gone; ignore.
+        }
       }
       return Promise.resolve();
     }
@@ -262,8 +270,8 @@ export class TerminalSession {
         try {
           process.kill(-pid, 0);
           return false;
-        } catch {
-          return true; // ESRCH — group gone
+        } catch (err) {
+          return (err as NodeJS.ErrnoException)?.code === 'ESRCH';
         }
       };
       try {
@@ -271,10 +279,12 @@ export class TerminalSession {
       } catch (err) {
         // ESRCH: group already gone — nothing left to escalate to SIGKILL.
         if ((err as NodeJS.ErrnoException)?.code !== 'ESRCH') {
-          try {
-            this.pty.kill();
-          } catch {
-            // Process already gone; ignore.
+          if (!this.exited) {
+            try {
+              this.pty.kill();
+            } catch {
+              // Process already gone; ignore.
+            }
           }
         }
         resolve();

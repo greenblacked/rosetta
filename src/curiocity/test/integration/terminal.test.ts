@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
@@ -300,6 +300,43 @@ describe('TerminalSession', () => {
 
       // By the time the awaited kill() resolves, the SIGKILL escalation must already
       // have reaped the SIGTERM-immune process.
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      rmSync(pidDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it('F8: kill() still reaps a backgrounded group member after the PTY leader has already exited', async () => {
+    // Before the fix, `kill()` returned immediately when `this.exited` was already true
+    // (the PTY leader's main process had exited) WITHOUT ever signalling the leader's
+    // process group — so a backgrounded, TERM-ignoring subprocess it spawned (e.g. via
+    // `&`) outlived the curion. The shell here backgrounds a `sleep` that traps and
+    // ignores SIGTERM, then exits its own main process immediately — modeling exactly
+    // that scenario. `kill()` must still reach the surviving group member.
+    const pidDir = mkdtempSync(join(tmpdir(), 'curiocity-f8-'));
+    const pidFile = join(pidDir, 'pid');
+    try {
+      const script = `trap '' TERM; sleep 30 & echo $! > ${pidFile}; echo BACKGROUNDED; exit 0`;
+      const s = new TerminalSession({
+        command: '/bin/sh',
+        args: ['-c', script],
+        cwd: process.cwd(),
+        env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin' },
+        submit: 'enter',
+      });
+
+      // Wait for the main shell process to have exited on its own, BEFORE kill() is
+      // ever called — the exact precondition the finding describes.
+      await waitFor(() => s.hasExited);
+      await waitFor(() => existsSync(pidFile));
+      const pid = Number(readFileSync(pidFile, 'utf8').trim());
+      expect(() => process.kill(pid, 0)).not.toThrow(); // backgrounded sleep still alive
+
+      await s.kill();
+
+      // kill() must have signalled the (still-existing) process group and reaped the
+      // TERM-ignoring background subprocess via the SIGKILL escalation, even though the
+      // PTY leader itself was already gone when kill() was called.
       expect(() => process.kill(pid, 0)).toThrow();
     } finally {
       rmSync(pidDir, { recursive: true, force: true });
