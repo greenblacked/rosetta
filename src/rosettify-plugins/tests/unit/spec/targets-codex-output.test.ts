@@ -45,7 +45,10 @@ function buildInstructionsTree(): string {
       // elsewhere in the SAME content, which must be left untouched — that is exactly why the
       // literal pair keys on the long form.
       'WORKFLOW/COMMAND `workflows/*.md`\n\n' +
-      'See also the unrelated glob `workflows/*.md` used elsewhere.\n',
+      'See also the unrelated glob `workflows/*.md` used elsewhere.\n\n' +
+      // D6: exercises the pluginReplaceLiterals correction on the AGENT/SUBAGENT glob-doc
+      // string — Codex agents land at `.codex/agents/*.toml`, not `agents/*.md`.
+      'AGENT/SUBAGENT `agents/*.md`\n',
   );
 
   writeFile(
@@ -247,6 +250,16 @@ describe('core-codex — generated output shape (FR-VAR-0041, FR-VAR-0042, FR-ST
     expect(content).not.toContain('WORKFLOW/COMMAND `workflows/*.md`');
     // Bare, unrelated mention of the same literal token survives untouched.
     expect(content).toContain('unrelated glob `workflows/*.md`');
+  });
+
+  // D6 — pluginReplaceLiterals correction on the AGENT/SUBAGENT glob-doc string: the real
+  // agent files land at `.codex/agents/*.toml`, which is outside the Plugin Path (`.agents`)
+  // the root hook reports, so the noun must point there explicitly with a relative `../` prefix.
+  it('rewrites the AGENT/SUBAGENT glob-doc string to the .codex/agents/*.toml form (D6)', () => {
+    const ruleDoc = path.join(targetRoot, '.agents', 'rules', 'sample-rule.md');
+    const content = fs.readFileSync(ruleDoc, 'utf-8');
+    expect(content).toContain('AGENT/SUBAGENT `../.codex/agents/*.toml`');
+    expect(content).not.toContain('AGENT/SUBAGENT `agents/*.md`');
   });
 
   // FR-HOOK-0003 (Deprecated) — the preserved manifest and generated bootstrap payload no
