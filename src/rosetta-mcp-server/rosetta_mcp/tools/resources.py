@@ -85,4 +85,39 @@ async def read_instruction_resource(
             trace_id,
         )
         return f"Error: No documents found for resource path: {normalized_path}"
-    return await bundler.bundle_async(docs, dataset_name)
+
+    try:
+        return await bundler.bundle_async(docs, dataset_name)
+    except Exception as exc:
+        # B3: the cached doc list can point at a document id a publish has
+        # since deleted (e.g. the cache TTL outlives the id it names). Rather
+        # than serve an error for the rest of the TTL, invalidate the cache,
+        # refetch the doc list once and retry the bundle with fresh ids.
+        _logger.warning(
+            "read_instruction_resource: bundle failed for path '%s' trace=%s, "
+            "invalidating doc cache and retrying once: %s",
+            normalized_path,
+            trace_id,
+            exc,
+        )
+        doc_cache.invalidate()
+        try:
+            all_docs = await doc_cache.get_all_docs_async(dataset, dataset_name)
+            docs = [doc for doc in all_docs if Bundler._resource_path(doc) == normalized_path]
+            if not docs:
+                _logger.error(
+                    "read_instruction_resource: no docs for path '%s' trace=%s after cache retry",
+                    normalized_path,
+                    trace_id,
+                )
+                return f"Error: No documents found for resource path: {normalized_path}"
+            return await bundler.bundle_async(docs, dataset_name)
+        except Exception as retry_exc:
+            _logger.error(
+                "read_instruction_resource: retry failed for path '%s' trace=%s: %s",
+                normalized_path,
+                trace_id,
+                retry_exc,
+                exc_info=True,
+            )
+            return f"Error: failed to bundle resource '{normalized_path}': {retry_exc}"

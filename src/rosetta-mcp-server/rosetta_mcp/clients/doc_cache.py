@@ -40,7 +40,11 @@ class InstructionDocCache:
         docs = self._document_client.list_docs(
             dataset=dataset, page_size=10000,
         )
-        self._cache[dataset_name] = docs
+        # Do not cache an empty result (e.g. a publish in flight, or a
+        # transient RAGFlow hiccup) - it would be served as "no documents"
+        # for the full TTL. Only a non-empty list is cached.
+        if docs:
+            self._cache[dataset_name] = docs
         return docs
 
     async def get_all_docs_async(
@@ -71,8 +75,10 @@ class InstructionDocCache:
             ),
             timeout=timeout,
         )
-        # Write back on the event-loop thread (SPECS A-1).
-        self._cache[dataset_name] = docs
+        # Write back on the event-loop thread (SPECS A-1). Do not cache an
+        # empty result - see get_all_docs for why.
+        if docs:
+            self._cache[dataset_name] = docs
         return docs
 
     def invalidate(self) -> None:
