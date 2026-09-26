@@ -14,13 +14,18 @@ import type {
 import { computeCostUsd } from './pricing.js';
 import { renderDataBlock } from './delimiters.js';
 
-const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
+const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 /** `error.type` values the SDK attaches to a status-less APIError it throws for a mid-stream SSE
  * `error` event (see @anthropic-ai/sdk core/streaming.ts: `new APIError(undefined, body, ...,
  * type)`). These mirror server-side/transient failures and should be retried like their HTTP-status
  * equivalents; anything else status-less (e.g. the SDK's own pre-flight "Streaming is required"
  * error, or invalid_request_error) is a client-side/non-transient failure and must not be retried. */
-const RETRYABLE_STREAM_ERROR_TYPES = new Set(['overloaded_error', 'api_error', 'rate_limit_error']);
+const RETRYABLE_STREAM_ERROR_TYPES = new Set([
+  'overloaded_error',
+  'api_error',
+  'rate_limit_error',
+  'timeout_error',
+]);
 /** Retry a transient API failure up to this many times (exponential backoff) before giving up. */
 const MAX_RETRIES = 3;
 

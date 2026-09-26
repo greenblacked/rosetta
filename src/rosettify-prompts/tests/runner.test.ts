@@ -656,4 +656,70 @@ describe('R2: mid-stream SSE `error` events (status-less APIError)', () => {
     expect(runs[0].error).toMatch(/invalid_request_error/);
     expect(calls).toBe(1);
   });
+
+  it('retries a status-less APIError with a transient error type (timeout_error) and succeeds', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: {
+        stream() {
+          calls++;
+          return {
+            finalMessage: async () => {
+              if (calls === 1) {
+                // Mid-stream SSE `error` event with type `timeout_error` — the streaming
+                // equivalent of an HTTP 504 — must be retried like its status-based sibling.
+                throw new APIError(undefined, { error: { type: 'timeout_error' } }, undefined, undefined, 'timeout_error');
+              }
+              return {
+                content: [{ type: 'text', text: 'answer' }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+                stop_reason: 'end_turn',
+              };
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const [run] = await runBenchSuite(client, config);
+    expect(run.error).toBeUndefined();
+    expect(run.turns[0].assistantText).toBe('answer');
+    expect(calls).toBe(2);
+  });
+});
+
+describe('529 overloaded HTTP status is retried', () => {
+  it('retries an HTTP 529 (overloaded) error and succeeds', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: fakeMessages(async () => {
+        calls++;
+        if (calls === 1) {
+          throw Object.assign(new Error('overloaded'), { status: 529 });
+        }
+        return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
+    } as unknown as Anthropic;
+
+    const [run] = await runBenchSuite(client, config);
+    expect(run.error).toBeUndefined();
+    expect(run.turns[0].assistantText).toBe('answer');
+    expect(calls).toBe(2);
+  });
 });

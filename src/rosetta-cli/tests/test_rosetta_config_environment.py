@@ -184,6 +184,32 @@ def test_explicit_environment_overrides_preexisting_shell_env(tmp_path, monkeypa
     assert config.api_key == "ragflow-DEVKEY"
 
 
+def test_env_name_with_env_file_var_overrides_shell_env(tmp_path, monkeypatch):
+    """`--env NAME` combined with ROSETTA_CLI_ENV_FILE must still override.
+
+    When the file is selected via ROSETTA_CLI_ENV_FILE (itself an explicit,
+    user-chosen file - see ENV_FILE_ENV_VAR and find_env_file()), that choice
+    is explicit even though its basename isn't `.env.<NAME>`. Regression: this
+    previously fell through to the non-overriding "generic .env fallback"
+    path and silently kept the pre-existing shell env.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-prod.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-PRODKEY")
+
+    env_file = tmp_path / "custom.env"
+    env_file.write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-dev.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-DEVKEY\n"
+    )
+    monkeypatch.setenv("ROSETTA_CLI_ENV_FILE", str(env_file))
+
+    config = RosettaConfig.from_env(environment="dev")
+
+    assert config.base_url == "https://ragflow-dev.example.com"
+    assert config.api_key == "ragflow-DEVKEY"
+
+
 def test_explicit_env_file_overrides_preexisting_shell_env(tmp_path, monkeypatch):
     """An explicit `--env-file` path must also win over pre-existing shell env."""
     monkeypatch.chdir(tmp_path)
