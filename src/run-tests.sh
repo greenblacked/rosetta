@@ -1,6 +1,11 @@
 #!/bin/bash
 
-set -euo pipefail
+# E7: no `-e`. This script must run every suite even if an earlier one fails,
+# collect which ones failed, and exit non-zero at the end with a summary --
+# not abort at the first failure and silently skip the rest.
+set -uo pipefail
+
+failed=()
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -32,21 +37,29 @@ fi
 
 if [ ${#PYTEST_CMD[@]} -gt 0 ]; then
     echo -e "${BLUE}Running rosetta-mcp-server tests...${NC}"
-    PYTHONPATH="src/rosetta-mcp-server${PYTHONPATH:+:$PYTHONPATH}" \
-        "${PYTEST_CMD[@]}" --no-header -qq --tb=short -o console_output_style=classic src/rosetta-mcp-server/tests
+    if ! PYTHONPATH="src/rosetta-mcp-server${PYTHONPATH:+:$PYTHONPATH}" \
+        "${PYTEST_CMD[@]}" --no-header -qq --tb=short -o console_output_style=classic src/rosetta-mcp-server/tests; then
+        failed+=("rosetta-mcp-server")
+    fi
 
     echo -e "${BLUE}Running rosetta-cli tests...${NC}"
-    PYTHONPATH="src/rosetta-cli${PYTHONPATH:+:$PYTHONPATH}" \
-        "${PYTEST_CMD[@]}" --no-header -qq --tb=short -o console_output_style=classic src/rosetta-cli/tests
-
+    if ! PYTHONPATH="src/rosetta-cli${PYTHONPATH:+:$PYTHONPATH}" \
+        "${PYTEST_CMD[@]}" --no-header -qq --tb=short -o console_output_style=classic src/rosetta-cli/tests; then
+        failed+=("rosetta-cli")
+    fi
 fi
 
 test_ts() {  # $1 = path under repo root, $2 = "build" to build first
     local dir="$REPO_ROOT/$1" name; name="$(basename "$1")"
     if [ -d "$dir/node_modules" ]; then
         echo -e "${BLUE}Running $name tests...${NC}"
-        [ "${2:-}" = "build" ] && npm --silent --prefix "$dir" run build
-        npm --silent --prefix "$dir" run test -- --reporter=minimal
+        if [ "${2:-}" = "build" ] && ! npm --silent --prefix "$dir" run build; then
+            failed+=("$name")
+            return
+        fi
+        if ! npm --silent --prefix "$dir" run test -- --reporter=minimal; then
+            failed+=("$name")
+        fi
     else
         echo -e "${YELLOW}WARNING: $1/node_modules not found. Skipping $name tests (npm --prefix $1 install).${NC}"
     fi
@@ -57,5 +70,10 @@ test_ts src/hooks
 test_ts src/rosettify          build
 test_ts src/rosettify-plugins
 test_ts src/rosettify-prompts
+
+if [ ${#failed[@]} -gt 0 ]; then
+    echo -e "${RED}Test validation failed. Failed suites: ${failed[*]}${NC}"
+    exit 1
+fi
 
 echo -e "${GREEN}Test validation passed${NC}"
