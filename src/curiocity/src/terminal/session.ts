@@ -160,8 +160,17 @@ export class TerminalSession {
   /** Raw input write, chunked + event-loop-yielding to honor backpressure (§4). */
   async write(input: string): Promise<void> {
     if (this.exited) return;
-    for (let off = 0; off < input.length; off += WRITE_CHUNK) {
-      this.pty.write(input.slice(off, off + WRITE_CHUNK));
+    let off = 0;
+    while (off < input.length) {
+      let end = Math.min(off + WRITE_CHUNK, input.length);
+      // (C8) Never split a UTF-16 surrogate pair at the chunk boundary: each chunk is
+      // UTF-8 encoded independently, so a lone high surrogate at the end of one chunk
+      // and its low surrogate at the start of the next each become U+FFFD instead of
+      // the original astral character (e.g. an emoji in a typed answer).
+      const code = input.charCodeAt(end - 1);
+      if (end < input.length && code >= 0xd800 && code <= 0xdbff) end -= 1;
+      this.pty.write(input.slice(off, end));
+      off = end;
       // Yield so the concurrent read loop drains before the next chunk.
       await yieldToLoop();
     }
@@ -219,8 +228,41 @@ export class TerminalSession {
     return this.pane.snapshot();
   }
 
+  /**
+   * (C2, part 1) `pty.kill()` alone only sends SIGHUP to the PTY's leader process — an
+   * agent CLI that ignores SIGHUP (or backgrounds/`nohup`s a subprocess) survives, along
+   * with anything it spawned, orphaned once the curion exits. node-pty's forkpty makes
+   * the PTY leader its own process-group leader, so `-pid` targets that whole group: send
+   * SIGTERM first (a chance to exit cleanly), then SIGKILL if it is still alive 5s later.
+   * `pty.kill()` remains the fallback for Windows (no POSIX process groups there) and for
+   * the odd case where the group signal itself fails.
+   */
   kill(): void {
     if (this.exited) return;
+    const pid = this.pty.pid;
+    if (process.platform !== 'win32' && pid) {
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch (err) {
+        // ESRCH: group already gone — nothing left to escalate to SIGKILL.
+        if ((err as NodeJS.ErrnoException)?.code !== 'ESRCH') {
+          try {
+            this.pty.kill();
+          } catch {
+            // Process already gone; ignore.
+          }
+        }
+        return;
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // ESRCH (already exited) or any other failure — nothing more to do.
+        }
+      }, 5_000).unref();
+      return;
+    }
     try {
       this.pty.kill();
     } catch {

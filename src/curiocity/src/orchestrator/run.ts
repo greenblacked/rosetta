@@ -126,7 +126,9 @@ export async function runSuite(args: RunSuiteArgs): Promise<RunSuiteResult> {
       const { result, wroteArtifacts } = await runChildTrial({
         spec,
         childEnv,
-        timeoutMs: spec.timeoutSec * 1000,
+        // C1: the child's own engine deadline (lifecycle.ts) expires well before this —
+        // this is now a BACKSTOP for a child that fails to exit on its own timeout path.
+        timeoutMs: spec.timeoutSec * 1000 + 120_000,
         ...(onLog ? { onLog } : {}),
         ...(args.onQna ? { onQna: (entry) => args.onQna!(entry, cell) } : {}),
         ...(args.onMirror ? { onMirror: (data) => args.onMirror!(data, cell) } : {}),
