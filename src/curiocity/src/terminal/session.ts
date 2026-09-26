@@ -236,11 +236,36 @@ export class TerminalSession {
    * SIGTERM first (a chance to exit cleanly), then SIGKILL if it is still alive 5s later.
    * `pty.kill()` remains the fallback for Windows (no POSIX process groups there) and for
    * the odd case where the group signal itself fails.
+   *
+   * (R6) This returns a Promise that resolves only once the group is confirmed gone
+   * (polling `process.kill(-pid, 0)` for ESRCH) or the 5s SIGKILL escalation has been
+   * sent and had time to take effect. Callers (curion teardown) MUST await it. Before
+   * this fix, the SIGKILL timer was `.unref()`'d and `kill()` returned immediately: a
+   * caller that doesn't keep the event loop alive on anything else (the normal case —
+   * teardown finishes and the curion process exits) let the process exit before that
+   * unref'd timer ever fired, dropping the escalation entirely and orphaning a
+   * SIGTERM-ignoring agent. Awaiting this promise makes the escalation reliable.
    */
-  kill(): void {
-    if (this.exited) return;
+  kill(): Promise<void> {
+    if (this.exited) return Promise.resolve();
     const pid = this.pty.pid;
-    if (process.platform !== 'win32' && pid) {
+    if (process.platform === 'win32' || !pid) {
+      try {
+        this.pty.kill();
+      } catch {
+        // Process already gone; ignore.
+      }
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const isGroupGone = (): boolean => {
+        try {
+          process.kill(-pid, 0);
+          return false;
+        } catch {
+          return true; // ESRCH — group gone
+        }
+      };
       try {
         process.kill(-pid, 'SIGTERM');
       } catch (err) {
@@ -252,21 +277,37 @@ export class TerminalSession {
             // Process already gone; ignore.
           }
         }
+        resolve();
         return;
       }
-      setTimeout(() => {
-        try {
-          process.kill(-pid, 'SIGKILL');
-        } catch {
-          // ESRCH (already exited) or any other failure — nothing more to do.
+      const POLL_MS = 100;
+      const SIGKILL_AT_MS = 5_000;
+      // Bound the total wait so a pathological case (SIGKILL itself somehow not taking)
+      // cannot hang teardown forever; SIGKILL is not actually catchable, so this margin
+      // only covers the OS's own reaping delay.
+      const GIVE_UP_AT_MS = SIGKILL_AT_MS + 3_000;
+      let elapsed = 0;
+      let killSent = false;
+      const poll = setInterval(() => {
+        if (isGroupGone()) {
+          clearInterval(poll);
+          resolve();
+          return;
         }
-      }, 5_000).unref();
-      return;
-    }
-    try {
-      this.pty.kill();
-    } catch {
-      // Process already gone; ignore.
-    }
+        elapsed += POLL_MS;
+        if (!killSent && elapsed >= SIGKILL_AT_MS) {
+          killSent = true;
+          try {
+            process.kill(-pid, 'SIGKILL');
+          } catch {
+            // ESRCH (caught by isGroupGone on the next tick) or another failure.
+          }
+        }
+        if (elapsed >= GIVE_UP_AT_MS) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, POLL_MS);
+    });
   }
 }

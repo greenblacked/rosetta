@@ -231,14 +231,18 @@ export async function runTrial(spec: TrialSpec, opts: RunTrialOptions): Promise<
       profile,
       router,
       qnaPolicy: spec.qna,
-      // C1 (§7 timeout path): the engine's own deadline must expire BEFORE the parent's
-      // timeout kill (run.ts) reaches it, or the graceful timeout path here (trajectory,
-      // transcript, diff, teardown, temp cleanup) never runs — the parent's SIGKILL is
-      // uncatchable and skips all of it. Budget = remaining trial time minus a margin, so
-      // collect/evaluate/teardown have time to finish before the parent's backstop fires.
+      // C1/R7 (§7 timeout path): the engine's own deadline must expire BEFORE the
+      // parent's timeout kill (`orchestrator/child.ts`) reaches it, or the graceful
+      // timeout path here (trajectory, transcript, diff, teardown, temp cleanup) never
+      // runs — the parent's SIGKILL is uncatchable and skips all of it. The parent
+      // backstop is `timeoutSec*1000 + 120s` (run.ts), which already reserves the margin
+      // for collect/evaluate/teardown to run AFTER the engine returns — so the engine's
+      // own budget is simply the remaining trial time, with NO extra margin subtracted
+      // here (subtracting one would double-count against the parent's +120s and starve
+      // short trials: for timeoutSec<=16 the old `-15_000` term left ~1s regardless of
+      // timeoutSec, a severe regression from the pre-R7 budget of timeoutSec+10s).
       maxWallClockMs:
-        opts.maxWallClockMs ??
-        Math.max(1_000, spec.timeoutSec * 1000 - (Date.now() - startedAt) - 15_000),
+        opts.maxWallClockMs ?? Math.max(1_000, spec.timeoutSec * 1000 - (Date.now() - startedAt)),
       ...(spec.maxTurns !== undefined ? { maxTurns: spec.maxTurns } : {}),
       ...(opts.pollIntervalMs !== undefined ? { pollIntervalMs: opts.pollIntervalMs } : {}),
       ...(opts.onQna ? { onQna: opts.onQna } : {}),
@@ -345,7 +349,10 @@ export async function runTrial(spec: TrialSpec, opts: RunTrialOptions): Promise<
       }
       phases.teardownMs = Date.now() - teardownStart;
     }
-    session?.kill();
+    // (R6) Await the kill so the SIGKILL escalation (§2, terminal/session.ts) is
+    // guaranteed to run to completion before this Curion exits, instead of racing an
+    // unref'd timer against process exit.
+    await session?.kill();
   }
 
   // --- Workspace retention (§7 step 8) --------------------------------------

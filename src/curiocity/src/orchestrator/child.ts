@@ -118,11 +118,23 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
       }
     };
 
+    // (R1) `killTimer` schedules the SIGKILL escalation and must NOT be cancelled by
+    // `finish()` — `finish()` resolves the returned promise (so the orchestrator can move
+    // on to the next trial) but that is orthogonal to whether the child process tree is
+    // actually dead yet. Only clear it once the child has genuinely gone away ('exit').
+    // Before this fix, `finish()` cleared `killTimer` unconditionally, so the very
+    // `finish()` call inside the timeout handler below cancelled the SIGKILL it had just
+    // scheduled a line earlier — a child that ignores SIGTERM then lived forever.
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearKillTimer = (): void => {
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      killTimer = undefined;
+    };
+
     const finish = (res: ChildTrialResult): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      clearTimeout(killTimer);
       resolve(res);
     };
 
@@ -130,8 +142,8 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
     // before this fires, so in normal operation the child exits on its own and this
     // timer is cleared first. This is a BACKSTOP: SIGTERM first (letting a still-alive
     // child unwind through its own timeout/teardown path), SIGKILL only if it ignores
-    // that for 10s.
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    // that for 10s. The SIGKILL timer survives `finish()` (see `clearKillTimer` above)
+    // and is cancelled only by the child's own 'exit' event.
     const timer = setTimeout(() => {
       killTree('SIGTERM');
       killTimer = setTimeout(() => killTree('SIGKILL'), 10_000);
@@ -171,6 +183,10 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
     });
 
     child.on('exit', () => {
+      // (R1) The child is genuinely gone now — no SIGKILL escalation is needed (or, if
+      // already sent, none is needed anymore). This is the only place `killTimer` is
+      // cleared, so a still-alive, SIGTERM-ignoring child always gets its SIGKILL.
+      clearKillTimer();
       if (resultMsg) {
         finish({ result: resultMsg, wroteArtifacts: true });
         return;

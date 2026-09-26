@@ -282,7 +282,7 @@ export class InteractionEngine {
     while (!this.session.hasExited && this.now() < deadline) {
       await this.sleep(this.pollMs);
     }
-    if (!this.session.hasExited) this.session.kill();
+    if (!this.session.hasExited) await this.session.kill();
   }
 
   // --- Readiness (launching → ready) -----------------------------------------
