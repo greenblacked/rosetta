@@ -450,7 +450,19 @@ async def _healthz_handler(request: Any) -> Any:
     checked_at = time.time()
     try:
         def _probe() -> None:
-            _RAGFLOW.get("/datasets", params={"page": 1, "page_size": 1})
+            # RAGFlow's SDK .get() never calls raise_for_status(), so an HTTP
+            # error or an application-level error code (e.g. an invalid API
+            # key) would otherwise be reported as "ok" (B4).
+            res = _RAGFLOW.get("/datasets", params={"page": 1, "page_size": 1})
+            status_code = getattr(res, "status_code", 200)
+            if status_code >= 400:
+                raise RuntimeError(f"ragflow status {status_code}")
+            try:
+                body = res.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict) and body.get("code", 0) != 0:
+                raise RuntimeError(str(body.get("message", "ragflow error")))
 
         await asyncio.wait_for(
             asyncio.to_thread(_probe),

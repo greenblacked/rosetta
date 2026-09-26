@@ -254,3 +254,56 @@ async def test_healthz_cache_expires_and_new_probe_runs():
     # A new probe ran
     assert body["cached"] is False
     assert probe_calls, "Expected a new probe call after TTL expiry"
+
+
+# ── B4: an HTTP error or an app-level error code must not read as "ok" ───────
+
+@pytest.mark.asyncio
+async def test_healthz_probe_http_5xx_returns_503():
+    """RAGFlow returning HTTP 502 must not be reported as ok (B4)."""
+    mock_ragflow = MagicMock()
+    mock_response = MagicMock(status_code=502)
+    mock_response.json.side_effect = ValueError("not json")
+    mock_ragflow.get = MagicMock(return_value=mock_response)
+
+    mock_config = MagicMock()
+    mock_config.healthz_cache_ttl = 0
+    mock_config.healthz_ragflow_timeout = 5.0
+
+    with (
+        patch.object(server_module, "_RAGFLOW", mock_ragflow),
+        patch.object(server_module, "_HEALTHZ_CACHE", None),
+        patch.object(server_module, "_CONFIG", mock_config),
+    ):
+        response = await _healthz_handler(_FakeRequest())
+
+    assert response.status_code == 503
+    body = _parse_body(response)
+    assert body["status"] == "unhealthy"
+    assert body["ragflow"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_healthz_probe_app_level_error_code_returns_503():
+    """A 200 response carrying RAGFlow's own error code (e.g. bad API key) must
+    not be reported as ok (B4)."""
+    mock_ragflow = MagicMock()
+    mock_response = MagicMock(status_code=200)
+    mock_response.json.return_value = {"code": 109, "message": "API key is invalid!"}
+    mock_ragflow.get = MagicMock(return_value=mock_response)
+
+    mock_config = MagicMock()
+    mock_config.healthz_cache_ttl = 0
+    mock_config.healthz_ragflow_timeout = 5.0
+
+    with (
+        patch.object(server_module, "_RAGFLOW", mock_ragflow),
+        patch.object(server_module, "_HEALTHZ_CACHE", None),
+        patch.object(server_module, "_CONFIG", mock_config),
+    ):
+        response = await _healthz_handler(_FakeRequest())
+
+    assert response.status_code == 503
+    body = _parse_body(response)
+    assert body["status"] == "unhealthy"
+    assert body["ragflow"] == "error"
