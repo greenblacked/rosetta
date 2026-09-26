@@ -557,6 +557,96 @@ describe("atomicWriteWithBackup — options.errors override param (FR-SPECS-0071
 });
 
 // ---------------------------------------------------------------------------
+// atomicWriteWithBackup — finding 3: mutatorIgnoresCurrent + missing file must not ENOENT-loop
+// ---------------------------------------------------------------------------
+
+describe("atomicWriteWithBackup — finding 3: mutatorIgnoresCurrent with a missing plan file", () => {
+  // Reachable when createDocExclusive returns created:false due to lock-retry exhaustion, or the
+  // file is deleted between calls. Before the fix, step 5 unconditionally renameSync'd `filePath`
+  // to the backup slot even though `current` was just a `{}` placeholder for a file that does not
+  // exist on disk — every attempt threw ENOENT, exhausting maxRetries into backup_create_failed.
+  it("writes directly with previous_version null instead of looping to backup_create_failed", async () => {
+    const file = planFile("missing.json"); // never created — simulates the race described above
+
+    const result = await atomicWriteWithBackup<Plan, string>(
+      file,
+      (_current) => ({
+        ok: true,
+        result: "created",
+        updated: makePlan({ name: "Freshly Created" }),
+      }),
+      savePlan,
+      { mutatorIgnoresCurrent: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.result!.backupPath).toBeNull();
+    expect(fs.existsSync(file)).toBe(true);
+
+    const written = JSON.parse(fs.readFileSync(file, "utf8")) as Plan;
+    expect(written.name).toBe("Freshly Created");
+    expect(written.previous_version).toBeNull();
+
+    // No backup file of any kind should have been created — there was nothing to back up.
+    const dir = path.dirname(file);
+    const basename = path.basename(file);
+    const backups = fs.readdirSync(dir).filter((e) => e.startsWith(basename + ".bak"));
+    expect(backups.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// atomicWriteWithBackup — finding 4: mutatorIgnoresCurrent + valid non-object JSON
+// ---------------------------------------------------------------------------
+
+describe("atomicWriteWithBackup — finding 4: mutatorIgnoresCurrent with valid non-object JSON", () => {
+  // Before the fix, readDocWithRetry's `"previous_version" in raw` check threw a bare TypeError
+  // for these shapes (not a SyntaxError), which R4's recovery didn't recognize — so it fell
+  // through to the unconditional `return err(corruptedError)`, permanently blocking a mutator
+  // (like `plan create`) that never reads `current` at all.
+  it.each([
+    ["null", "null"],
+    ["a bare number", "0"],
+    ["an array", "[]"],
+  ])("backs up and replaces content that parses to %s, like a SyntaxError", async (_label, raw) => {
+    const file = planFile();
+    fs.writeFileSync(file, raw);
+
+    const result = await atomicWriteWithBackup<Plan, string>(
+      file,
+      (_current) => ({ ok: true, result: "created", updated: makePlan({ name: "Replaced" }) }),
+      savePlan,
+      { mutatorIgnoresCurrent: true },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.result!.backupPath).not.toBeNull();
+    expect(fs.existsSync(result.result!.backupPath!)).toBe(true);
+    expect(fs.readFileSync(result.result!.backupPath!, "utf8")).toBe(raw);
+
+    const written = JSON.parse(fs.readFileSync(file, "utf8")) as Plan;
+    expect(written.name).toBe("Replaced");
+  });
+
+  // Without mutatorIgnoresCurrent, behavior for other commands must stay unchanged: non-object
+  // JSON is reported cleanly as the caller's corrupted-error code, never an internal_error, and
+  // it is not silently recovered from.
+  it("still returns plan_file_corrupted (not internal_error) without mutatorIgnoresCurrent", async () => {
+    const file = planFile();
+    fs.writeFileSync(file, "null");
+
+    const result = await atomicWriteWithBackup<Plan, string>(
+      file,
+      (plan) => ({ ok: true, result: "ok", updated: { ...plan, updated_at: new Date().toISOString() } }),
+      savePlan,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("plan_file_corrupted");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // atomicWriteWithBackup — lock-acquisition edge cases (FR-PLAN-0024 step 0a)
 // ---------------------------------------------------------------------------
 

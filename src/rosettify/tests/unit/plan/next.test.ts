@@ -200,7 +200,7 @@ describe("cmdNext — R9 sequential active-phase selection", () => {
   // Reopened-earlier-dependency case: p1 is first in array order and incomplete, but its own
   // phase-level depends_on (on "p0") is unmet. Before the fix, cmdNext skipped p1 entirely and
   // treated p2 as active — hiding p1's in_progress step and breaking sequential ordering.
-  it("does not skip an earlier incomplete phase whose own deps are unmet, and surfaces its in_progress and blocked-by-deps steps", async () => {
+  it("does not skip an earlier incomplete phase whose own deps are unmet; reports its in_progress step but not its unready open step", async () => {
     const plan: Plan = {
       name: "Reopened Dependency Plan",
       description: "",
@@ -239,13 +239,9 @@ describe("cmdNext — R9 sequential active-phase selection", () => {
 
     // p1 remains the active phase (array order) — its in_progress step is always reported.
     expect(ids).toContain("s1-ip");
-    // p1's open step can't run yet (p1's own deps unmet) — surfaced in the blocked group
-    // (not dropped), while its own `status` field still reads "open" (only its grouping/
-    // ordering position changes, per FR-PLAN-0011).
-    expect(ids).toContain("s1-open");
-    const s1open = result.result!.next.find((s) => s.id === "s1-open")!;
-    expect(s1open.status).toBe("open");
-    expect(ids.indexOf("s1-open")).toBeGreaterThan(ids.indexOf("s1-ip"));
+    // p1's open step can't run yet (p1's own phase-level deps unmet) — it is simply not
+    // returned (not actionable, and not genuinely `blocked`-status either).
+    expect(ids).not.toContain("s1-open");
     // p2 must NOT be scanned at all — sequential ordering is enforced by array position.
     expect(ids).not.toContain("s2-open");
   });
@@ -287,10 +283,9 @@ describe("cmdNext — R9 sequential active-phase selection", () => {
     const result = await cmdNext(file, undefined, 10);
     expect(result.ok).toBe(true);
     const ids = result.result!.next.map((s) => s.id);
-    // p1 is active (first in array); its open step is surfaced (blocked group) not dropped,
-    // while its `status` field still reads "open".
-    expect(ids).toContain("s1-open");
-    expect(result.result!.next.find((s) => s.id === "s1-open")!.status).toBe("open");
+    // p1 is active (first in array); its open step can't run (p1's own deps unmet) and is
+    // simply not returned.
+    expect(ids).not.toContain("s1-open");
     // p2 is never scanned even though its own deps are satisfied — array order wins.
     expect(ids).not.toContain("s2-open");
   });
