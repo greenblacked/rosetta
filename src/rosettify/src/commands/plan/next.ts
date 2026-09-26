@@ -70,9 +70,10 @@ export async function cmdNext(
     // ahead to a later phase merely because an earlier incomplete phase's own depends_on are
     // unmet. Skipping would break sequential enforcement (a later phase's steps could appear in
     // `next` before an earlier phase finishes) and would hide the earlier phase's in_progress
-    // steps (interrupted work the caller must still see). The earlier phase's unmet-phase-dep
-    // open steps are instead surfaced via the `blocked` group below, so the caller sees why no
-    // work is ready there.
+    // steps (interrupted work the caller must still see). The earlier phase's open steps that
+    // are held back solely by its unmet phase-level depends_on are simply not returned (see
+    // below) — they are neither actionable nor genuinely `blocked`-status, and the flat `next`
+    // array has no group label to tell a caller the difference.
     let phasesToScan: Phase[];
     if (targetId) {
       phasesToScan = plan.phases.filter((p) => p.id === targetId);
@@ -98,16 +99,14 @@ export async function cmdNext(
           const phaseDepsOk = depsSatisfied(phase, phaseStatusMap);
           if (stepDepsOk && phaseDepsOk) {
             openReady.push(buildNextStep(step, phase));
-          } else if (!targetId && !phaseDepsOk) {
-            // R9 — this is the active phase (chosen by array order alone, see above) and it is
-            // not yet eligible to run because its own phase-level depends_on are unmet. Its open
-            // steps would otherwise silently vanish from every `next` call (no later phase is
-            // ever scanned while this one remains active), so surface them as `blocked` instead
-            // so the caller understands why. Kept out of the target_id path deliberately: a
-            // targeted phase's own unmet depends_on already yields no steps at all (A6), and
-            // target_id behaviour must not change here.
-            blocked.push(buildNextStep(step, phase));
           }
+          // else: held back solely by an unmet step-level or phase-level dependency — simply
+          // not returned. Previously these were surfaced in the `blocked` group, but the flat
+          // `next` array carries no group labels, so callers could not distinguish them from
+          // genuinely `blocked`-status steps and treated them as actionable. The step's own
+          // `status` on disk is untouched ("open"); it is just excluded from this response.
+          // in_progress steps of the active phase (above) are still always reported, so
+          // interrupted work remains visible even while the phase's own deps are unmet.
         } else if (st === "blocked") {
           blocked.push(buildNextStep(step, phase));
         } else if (st === "failed") {
