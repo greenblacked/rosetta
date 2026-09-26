@@ -154,8 +154,19 @@ jobs:
             # only fetched the dispatched ref's history, so fetch main
             # explicitly (fetch-depth: 0 there means this is a full, unshallow
             # fetch, not a shallow one that would need extra depth) (R3).
+            #
+            # Exception: dispatching main itself (the UI's default selection)
+            # makes origin/main and HEAD the same commit, so
+            # origin/main...HEAD is always empty and the run would silently
+            # validate nothing. Use HEAD^ in that one case instead (F6).
+            # $GITHUB_REF is the runner's default env var for the dispatched
+            # ref -- no `${{ github.ref }}` interpolation needed here.
             git -C "$PR_DIR" fetch origin main
-            BASE_REF="origin/main"
+            if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              BASE_REF="HEAD^"
+            else
+              BASE_REF="origin/main"
+            fi
           else
             BASE_REF="HEAD^"
           fi
@@ -174,6 +185,12 @@ jobs:
           # Count files
           if [ -z "$CHANGED_FILES" ]; then
             echo "count=0" >> $GITHUB_OUTPUT
+            # A dispatch run that finds nothing would otherwise look
+            # identical to a normal, healthy "no prompt changes" PR run --
+            # make it visible that this dispatch validated nothing (F6).
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "::notice::Dispatch run found 0 changed files under instructions/r*/** between $BASE_REF and HEAD -- nothing was validated."
+            fi
           else
             COUNT=$(echo "$CHANGED_FILES" | wc -w | tr -d ' ')
             echo "count=$COUNT" >> $GITHUB_OUTPUT
@@ -223,7 +240,7 @@ jobs:
             Changed count: ${{ steps.changed-files.outputs.count }}
             Output file: ${{ env.ALL_RESULTS_FILE }}
             Diff file: ${{ env.DIFF_FILE }}
-            PR content path: pr
+            PR content path: ${{ steps.changed-files.outputs.pr_dir }}
           show_full_output: false
           claude_args: |
             --model
@@ -246,6 +263,7 @@ jobs:
           CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
           BASE_REF: ${{ steps.changed-files.outputs.base_ref }}
           CHANGED_COUNT: ${{ steps.changed-files.outputs.count }}
+          PR_DIR: ${{ steps.changed-files.outputs.pr_dir }}
         run: |
           mkdir -p "$TMP_DIR"
           cat ./.github/prompts/prompt-comparison.md > "$CODEX_PROMPT_FILE"
@@ -256,7 +274,7 @@ jobs:
             printf 'Changed count: %s\n' "$CHANGED_COUNT"
             printf 'Output file: %s\n' "$ALL_RESULTS_FILE"
             printf 'Diff file: %s\n' "$DIFF_FILE"
-            printf 'PR content path: pr\n'
+            printf 'PR content path: %s\n' "$PR_DIR"
             printf '\n'
             printf 'Environment: `.agents/`, `.codex/`, and `.codex-plugin/` hold the Rosetta\n'
             printf 'instruction set -- tooling CI extracted into this workspace, not repository\n'
