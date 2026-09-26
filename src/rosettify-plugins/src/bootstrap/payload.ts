@@ -18,10 +18,13 @@ const MAX_ENTRY_CHARS = 10000; // NFR-0004
 
 /**
  * Build a claude hook entry JSON object (compact, with spaces after : and ,).
- * GT-3.1: {"type": "command", "command": "...", "once": true}
+ * GT-3.1: {"type": "command", "command": "..."}
+ * No "once": docs/hooks/claude-code.md says `once` applies to skill/agent hooks only (R1); on a
+ * SessionStart entry it would suppress re-injection on later `clear`/`compact` sources within the
+ * same session (D1), defeating the matcher fix below.
  */
 export function buildClaudeBootstrapEntry(command: string): string {
-  return `{"type": "command", "command": ${JSON.stringify(command)}, "once": true}`;
+  return `{"type": "command", "command": ${JSON.stringify(command)}}`;
 }
 
 /**

@@ -1,6 +1,6 @@
 // FR-ARCH-0055, FR-ARCH-0005 — claude bootstrap assembler (case-specific)
 // Writes templateContext['bootstrap_hooks'] — ONE shared key (FR-VAR-0070).
-// All entries emit "once":true (hardcoded in buildClaudeBootstrapEntry); plugin-root uses double-quoted printf.
+// Entries carry no "once" (D1: SessionStart must re-fire on clear/compact); plugin-root uses double-quoted printf.
 
 import { updatePluginFrame } from '../frames.js';
 import {
