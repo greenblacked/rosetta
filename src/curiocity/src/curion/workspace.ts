@@ -1,6 +1,6 @@
 import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import extract from 'extract-zip';
 import { execa } from 'execa';
 
@@ -28,9 +28,18 @@ export function createCtrlDir(): string {
  */
 export class UnsafeSymlinkError extends Error {}
 
+/**
+ * (R10) `path.relative()` returns a string starting with the two characters ".." for
+ * BOTH an actual parent-escape (`..`, `../sibling`) AND an in-workspace name that
+ * merely starts with two dots (e.g. a directory literally named `..shared`, so
+ * `relative()` yields `..shared/file.txt`). Only `rel === '..'` or a `rel` starting
+ * with `'..' + sep` is a real escape; a name like `..shared` is not `..` followed by a
+ * separator, so it must NOT be rejected. `!rel.startsWith('..')` (the old check)
+ * conflated the two and rejected legitimate in-workspace symlink targets.
+ */
 function isInside(root: string, target: string): boolean {
   const rel = relative(root, target);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel));
 }
 
 /** (E3) Walk `workspace` and reject any symlink whose target escapes it — including a

@@ -90,4 +90,26 @@ describe('E3: unzipSource rejects a src.zip that materializes an escaping symlin
     await expect(unzipSource(zipPath, workspace)).resolves.toBeUndefined();
     expect(readdirSync(workspace)).toContain('alias.txt');
   });
+
+  // R10: `path.relative(root, target)` for an in-workspace target whose path segment
+  // starts with two dots (e.g. a directory literally named `..shared`) yields a string
+  // like `..shared/real.txt` — which starts with the two characters ".." but is NOT a
+  // parent-escape (that would be `..` or `../real.txt`, i.e. ".." followed by a path
+  // separator). The old `!rel.startsWith('..')` check conflated the two and wrongly
+  // rejected this legitimate in-workspace symlink target.
+  it('R10: accepts a symlink into an in-workspace "..shared" directory (name starting with ".." is not an escape)', async () => {
+    const zipPath = buildZip((stage) => {
+      execFileSync('mkdir', ['-p', join(stage, '..shared')]);
+      writeFileSync(join(stage, '..shared', 'real.txt'), 'hello world');
+      // Target string "..shared/real.txt" (no leading "../") resolves, relative to the
+      // symlink's own directory (the stage root), to stage/..shared/real.txt — a
+      // directory NAMED "..shared", not "go up one directory".
+      symlinkSync('..shared/real.txt', join(stage, 'alias-into-dotdot-shared.txt'));
+    });
+    const workspace = tmp('curio-r10-ws-');
+
+    await expect(unzipSource(zipPath, workspace)).resolves.toBeUndefined();
+    expect(readdirSync(workspace)).toContain('alias-into-dotdot-shared.txt');
+    expect(readdirSync(workspace)).toContain('..shared');
+  });
 });
