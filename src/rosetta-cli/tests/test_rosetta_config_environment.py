@@ -217,3 +217,56 @@ def test_auto_discovered_env_file_does_not_override_shell_env(tmp_path, monkeypa
 
     assert config.base_url == "https://ragflow-prod.example.com"
     assert config.api_key == "ragflow-PRODKEY"
+
+
+# --- R8: `--env NAME` falling back to a generic .env must NOT override --------
+
+
+def test_env_name_falling_back_to_generic_dotenv_does_not_override_shell_env(
+    tmp_path, monkeypatch
+):
+    """`--env production` in CI must not let a stray local `.env` win.
+
+    If `.env.production` does not exist, `find_env_file("production")` falls
+    back to the generic `.env`. That fallback is auto-discovery, not an
+    explicit choice of the "production" file, so it must not override
+    CI-exported RAGFLOW_* vars (regression for R8).
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-ci.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-CIKEY")
+
+    # No .env.production present, only a generic, developer-local .env.
+    (tmp_path / ".env").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-local.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-LOCALKEY\n"
+    )
+
+    config = RosettaConfig.from_env(environment="production")
+
+    assert config.base_url == "https://ragflow-ci.example.com"
+    assert config.api_key == "ragflow-CIKEY"
+
+
+def test_env_name_resolving_to_specific_dotenv_does_override_shell_env(
+    tmp_path, monkeypatch
+):
+    """`--env dev` still overrides shell env when `.env.dev` actually exists."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-prod.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-PRODKEY")
+
+    (tmp_path / ".env.dev").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-dev.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-DEVKEY\n"
+    )
+    # A generic .env is also present but must be ignored in favor of .env.dev.
+    (tmp_path / ".env").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-generic.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-GENERICKEY\n"
+    )
+
+    config = RosettaConfig.from_env(environment="dev")
+
+    assert config.base_url == "https://ragflow-dev.example.com"
+    assert config.api_key == "ragflow-DEVKEY"
