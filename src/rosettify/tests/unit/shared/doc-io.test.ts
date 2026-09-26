@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { readDocWithRetry, atomicWriteWithBackup } from "../../../src/shared/doc-io.js";
+import { readDocWithRetry, atomicWriteWithBackup, createDocExclusive, writeDocAtomic } from "../../../src/shared/doc-io.js";
 import type { Plan } from "../../../src/commands/plan/core.js";
 import { savePlan } from "../../../src/commands/plan/core.js";
 
@@ -91,6 +91,149 @@ describe("readDocWithRetry — FR-SHRD-0009 happy path", () => {
     const file = planFile();
     fs.writeFileSync(file, "{{not valid json{{");
     await expect(readDocWithRetry<Plan>(file)).rejects.toThrow();
+  });
+});
+
+describe("readDocWithRetry — A3: ENOENT from readFileSync is treated as missing, not corrupted", () => {
+  // A3/FR-SHRD-0009/FR-PLAN-0024 — the old existsSync-then-readFileSync pair left a
+  // time-of-check/time-of-use gap: a concurrent writer's rename could remove the file between
+  // the two calls, and a bare ENOENT from readFileSync was indistinguishable from a real parse
+  // failure once the read moved past that gap. This mocks the file disappearing mid-read (no
+  // backup present, so it must return null on the very next check rather than throw).
+  it("treats an ENOENT thrown by readFileSync as 'file missing' and continues, not throws", async () => {
+    const file = planFile("race.json");
+    let calls = 0;
+    vi.spyOn(fs, "readFileSync").mockImplementation((() => {
+      calls++;
+      const e = new Error("ENOENT: no such file or directory") as NodeJS.ErrnoException;
+      e.code = "ENOENT";
+      throw e;
+    }) as never);
+
+    const result = await readDocWithRetry<Plan>(file);
+    expect(result).toBeNull();
+    expect(calls).toBe(1); // no backup exists, so it returns immediately without retrying
+  });
+
+  // A parse failure (JSON.parse SyntaxError has no .code) must still bubble, exactly like before.
+  it("still throws for a genuine parse failure, not swallowed as ENOENT", async () => {
+    const file = planFile("corrupt.json");
+    fs.writeFileSync(file, "{{not valid json{{");
+    await expect(readDocWithRetry<Plan>(file)).rejects.toThrow();
+  });
+});
+
+describe("writeDocAtomic — A3/FR-PLAN-0024 tmp-file + rename", () => {
+  it("writes the final content and leaves no .tmp-* file behind", () => {
+    const file = planFile("atomic.json");
+    writeDocAtomic(file, JSON.stringify({ hello: "world" }));
+    expect(fs.readFileSync(file, "utf8")).toBe(JSON.stringify({ hello: "world" }));
+    const leftovers = fs.readdirSync(path.dirname(file)).filter((n) => n.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+  });
+
+  it("creates the parent directory when missing", () => {
+    const file = path.join(tmpDir, "nested", "deep", "doc.json");
+    writeDocAtomic(file, "{}");
+    expect(fs.existsSync(file)).toBe(true);
+  });
+
+  it("cleans up the tmp file and rethrows when the rename fails", () => {
+    const file = planFile("fail-atomic.json");
+    const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("simulated rename failure");
+    });
+    expect(() => writeDocAtomic(file, "{}")).toThrow("simulated rename failure");
+    renameSpy.mockRestore();
+    const leftovers = fs.readdirSync(path.dirname(file)).filter((n) => n.includes(".tmp-"));
+    expect(leftovers).toEqual([]); // unlinked by the catch block, not left behind
+  });
+});
+
+describe("createDocExclusive — A2/FR-PLAN-0024 exclusive first-create", () => {
+  interface Doc {
+    name: string;
+  }
+
+  it("creates the document when the file is missing", async () => {
+    const file = planFile("exclusive.json");
+    const result = await createDocExclusive<Doc>(
+      file,
+      () => ({ name: "created" }),
+      (f, doc) => fs.writeFileSync(f, JSON.stringify(doc)),
+    );
+    expect(result).toEqual({ created: true });
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ name: "created" });
+  });
+
+  it("returns created:false without writing when the file already exists", async () => {
+    const file = planFile("already-exists.json");
+    fs.writeFileSync(file, JSON.stringify({ name: "original" }));
+    const buildDoc = vi.fn(() => ({ name: "should-not-be-written" }));
+    const result = await createDocExclusive<Doc>(file, buildDoc, (f, doc) => fs.writeFileSync(f, JSON.stringify(doc)));
+    expect(result).toEqual({ created: false });
+    // Original content is untouched — the caller is expected to fall through to
+    // atomicWriteWithBackup instead, which owns merging against the existing document.
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ name: "original" });
+  });
+
+  it("creates the parent directory when missing (mirrors savePlan/saveSpecs)", async () => {
+    const file = path.join(tmpDir, "nested", "doc.json");
+    const result = await createDocExclusive<Doc>(file, () => ({ name: "x" }), (f, doc) =>
+      fs.writeFileSync(f, JSON.stringify(doc)),
+    );
+    expect(result).toEqual({ created: true });
+    expect(fs.existsSync(file)).toBe(true);
+  });
+
+  it("re-checks existence under the lock: a file created between the lock acquire and the check is respected", async () => {
+    const file = planFile("race-under-lock.json");
+    const realExistsSync = fs.existsSync.bind(fs);
+    let firstCheck = true;
+    vi.spyOn(fs, "existsSync").mockImplementation(((p: fs.PathLike) => {
+      if (p === file && firstCheck) {
+        firstCheck = false;
+        // Simulate another process winning the race and creating the file the instant after
+        // this call takes the lock, but before it re-checks existence.
+        fs.writeFileSync(file, JSON.stringify({ name: "winner" }));
+        return true;
+      }
+      return realExistsSync(p);
+    }) as never);
+
+    const buildDoc = vi.fn(() => ({ name: "loser" }));
+    const result = await createDocExclusive<Doc>(file, buildDoc, (f, doc) => fs.writeFileSync(f, JSON.stringify(doc)));
+    expect(result).toEqual({ created: false });
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ name: "winner" });
+  });
+
+  it("releases the lock directory after a successful create", async () => {
+    const file = planFile("lock-release.json");
+    await createDocExclusive<Doc>(file, () => ({ name: "x" }), (f, doc) => fs.writeFileSync(f, JSON.stringify(doc)));
+    expect(fs.existsSync(file + ".lock")).toBe(false);
+  });
+
+  it("returns created:false when the lock cannot be acquired within maxRetries", async () => {
+    const file = planFile("lock-busy.json");
+    const lockPath = file + ".lock";
+    // Simulate the lock being permanently held by another process. Only the non-recursive
+    // mkdirSync(lockPath) call (the mutex itself) fails — the parent-directory
+    // mkdirSync(dir, {recursive:true}) call must still succeed normally.
+    const realMkdirSync = fs.mkdirSync.bind(fs);
+    vi.spyOn(fs, "mkdirSync").mockImplementation(((p: fs.PathLike, opts?: unknown) => {
+      if (p === lockPath) {
+        const e = new Error("EEXIST") as NodeJS.ErrnoException;
+        e.code = "EEXIST";
+        throw e;
+      }
+      return (realMkdirSync as (...a: unknown[]) => unknown)(p, opts);
+    }) as never);
+    vi.spyOn(fs, "statSync").mockReturnValue({ mtimeMs: Date.now() } as fs.Stats); // fresh lock, never stale
+
+    const buildDoc = vi.fn(() => ({ name: "x" }));
+    const result = await createDocExclusive<Doc>(file, buildDoc, (f, doc) => fs.writeFileSync(f, JSON.stringify(doc)), 2);
+    expect(result).toEqual({ created: false });
+    expect(buildDoc).not.toHaveBeenCalled();
   });
 });
 

@@ -100,6 +100,14 @@ function pruneBackups(filePath: string, retention: number): void {
  * - If file missing AND backup exists: sleep PLAN_READ_RETRY_DELAY_MS, retry up to PLAN_READ_MAX_RETRIES.
  * - If file missing AND no backup: return null immediately.
  * - If parse fails: throws (caller converts to a corrupted-error code).
+ *
+ * A3 (FR-SHRD-0009 / FR-PLAN-0024): reads via readFileSync directly instead of an
+ * existsSync-then-readFileSync pair, which left a time-of-check/time-of-use gap — a concurrent
+ * writer's tmp-file rename (see writeDocAtomic) could remove the file between the two calls,
+ * and a plain ENOENT from readFileSync was previously indistinguishable from a real parse
+ * failure. ENOENT is now treated exactly like "file missing" (continues the retry loop below);
+ * any other error (e.g. a JSON.parse SyntaxError) still throws so callers keep mapping it to
+ * their corrupted-error code.
  */
 export async function readDocWithRetry<Doc extends { previous_version?: string | null }>(
   filePath: string,
@@ -108,9 +116,17 @@ export async function readDocWithRetry<Doc extends { previous_version?: string |
   const basename = path.basename(filePath);
 
   for (let attempt = 0; attempt <= PLAN_READ_MAX_RETRIES; attempt++) {
-    if (fs.existsSync(filePath)) {
-      // FR-SHRD-0009 — file present, parse it
-      const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Doc;
+    let raw: Doc | undefined;
+    try {
+      raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Doc;
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT") throw e; // parse failure or other unexpected fs error — bubble up
+      // ENOENT falls through to the "file missing" handling below
+    }
+
+    if (raw !== undefined) {
+      // FR-SHRD-0009 — file present, parsed successfully
       // FR-PLAN-0017 — back-compat: inject previous_version:null if absent
       if (!("previous_version" in raw)) {
         (raw as Record<string, unknown>)["previous_version"] = null;
@@ -139,8 +155,134 @@ export async function readDocWithRetry<Doc extends { previous_version?: string |
 }
 
 // ---------------------------------------------------------------------------
+// Public: atomic write via tmp-file + rename (A3 / FR-PLAN-0024, FR-SHRD-0009)
+// ---------------------------------------------------------------------------
+
+/**
+ * Writes `content` to `filePath` by first writing a uniquely-named temp file in the same
+ * directory, then renaming it into place. POSIX rename is atomic, so a concurrent reader
+ * (readDocWithRetry, or any plain readFileSync) always observes either the old content in full
+ * or the new content in full — never a partial write. Used by savePlan/saveSpecs so readers
+ * polling `plan next` / `specs query` while a writer is in flight never see truncated JSON
+ * (A3 / FR-PLAN-0024). The temp file's `.tmp-<pid>-<rand>` naming is deliberately excluded from
+ * `listBackups`'s `.bakNNN` pattern, so it is never mistaken for a backup.
+ */
+export function writeDocAtomic(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = path.join(dir, `${path.basename(filePath)}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  try {
+    fs.writeFileSync(tmpPath, content);
+    fs.renameSync(tmpPath, filePath);
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup
+    }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public: Atomic write with backup chain (FR-PLAN-0024)
 // ---------------------------------------------------------------------------
+
+// A process holding the `.lock` mkdir mutex longer than this is treated as crashed and its
+// lock forcibly reclaimed (A2/FR-PLAN-0024). Shared by atomicWriteWithBackup and
+// createDocExclusive so both writers serialize against the very same mutex.
+const LOCK_STALE_MS = 30_000;
+const LOCK_SPIN_MS = 20;
+
+/**
+ * One attempt to acquire the `<filePath>.lock` mkdir mutex (A2/FR-PLAN-0024 step 0a). Returns
+ * `true` once this call has created the lock directory (caller now holds it); returns `false`
+ * after handling a failed attempt (EEXIST contention, possibly reclaiming a stale lock, or a
+ * transient non-EEXIST mkdir error) and sleeping a short, jittered spin delay — the caller is
+ * expected to loop and retry. Factored out of atomicWriteWithBackup so createDocExclusive can
+ * take the exact same mutex without re-implementing the stale-lock reclaim logic.
+ */
+async function tryAcquireLockOnce(lockPath: string): Promise<boolean> {
+  try {
+    fs.mkdirSync(lockPath);
+    return true;
+  } catch (e: unknown) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code !== "EEXIST") {
+      logger.warn({ lockPath, error: String(e) }, "lock acquire failed (non-EEXIST), restarting");
+      await new Promise<void>((r) => setTimeout(r, LOCK_SPIN_MS));
+      return false;
+    }
+    // EEXIST: another writer holds the lock — or its previous holder crashed.
+    try {
+      const stat = fs.statSync(lockPath);
+      const age = Date.now() - stat.mtimeMs;
+      if (age > LOCK_STALE_MS) {
+        logger.warn({ lockPath, ageMs: age }, "removing stale lock");
+        try { fs.rmdirSync(lockPath); } catch { /* race with another writer is fine */ }
+      }
+    } catch {
+      // lock disappeared between EEXIST and statSync — race is fine, just retry
+    }
+    await new Promise<void>((r) => setTimeout(r, LOCK_SPIN_MS + Math.floor(Math.random() * LOCK_SPIN_MS)));
+    return false;
+  }
+}
+
+function releaseLock(lockPath: string): void {
+  try {
+    fs.rmdirSync(lockPath);
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * A2/FR-PLAN-0024 — takes the same `.lock` mkdir mutex as atomicWriteWithBackup and performs an
+ * exclusive first-ever create: `buildDoc()` is only invoked, and only saved, while holding the
+ * lock and only after re-checking that `filePath` is still missing. This closes the race where
+ * two processes both observe a missing file (via `fs.existsSync`) before either has taken the
+ * lock, and both then call `saveDoc` directly — the loser's write previously clobbered or was
+ * clobbered by the winner's, depending on OS write scheduling, with no lock in between.
+ *
+ * Returns `{ created: true }` once this call's document has been written. Returns
+ * `{ created: false }` either because the file already existed once the lock was held (another
+ * process created it first) or because the lock could not be acquired within `maxRetries`
+ * attempts; either way, the caller MUST fall through to `atomicWriteWithBackup`, which re-takes
+ * the same lock and merges against whatever now exists on disk.
+ */
+export async function createDocExclusive<Doc>(
+  filePath: string,
+  buildDoc: () => Doc,
+  saveDoc: (filePath: string, doc: Doc) => void,
+  maxRetries = PLAN_BACKUP_MAX_RETRIES,
+): Promise<{ created: true } | { created: false }> {
+  const lockPath = filePath + ".lock";
+
+  // The `.lock` mutex is a sibling of filePath, so its parent directory must exist before
+  // mkdirSync(lockPath) can succeed — mirrors savePlan/saveSpecs, which both create it too.
+  // Safe under concurrent first-creates: mkdirSync(..., {recursive:true}) never throws EEXIST.
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const acquired = await tryAcquireLockOnce(lockPath);
+    if (!acquired) continue;
+
+    try {
+      // Re-check inside the lock: another process may have created the file while we were
+      // spinning for the lock, or between our caller's own existsSync check and this call.
+      if (fs.existsSync(filePath)) return { created: false };
+      saveDoc(filePath, buildDoc());
+      return { created: true };
+    } finally {
+      releaseLock(lockPath);
+    }
+  }
+
+  // Could not acquire the lock at all — let the caller fall through to atomicWriteWithBackup,
+  // which has its own (larger) retry budget for lock contention.
+  return { created: false };
+}
 
 /**
  * Wraps a document mutation in the rename-as-guard write cycle (FR-PLAN-0024).
@@ -175,35 +317,10 @@ export async function atomicWriteWithBackup<Doc extends { previous_version?: str
   // directory as a mutex around the entire read-mutate-rename-write cycle. Inside the lock
   // the simpler renameSync semantics suffice because no other writer can be in the cycle.
   const lockPath = filePath + ".lock";
-  const lockStaleMs = 30_000; // a process holding the lock longer than this is treated as crashed
-  const lockSpinMs = 20;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    // Step 0a: Acquire the lock. mkdirSync is atomic.
-    let lockHeld = false;
-    try {
-      fs.mkdirSync(lockPath);
-      lockHeld = true;
-    } catch (e: unknown) {
-      const code = (e as NodeJS.ErrnoException)?.code;
-      if (code !== "EEXIST") {
-        logger.warn({ attempt, lockPath, error: String(e) }, "lock acquire failed (non-EEXIST), restarting");
-        await new Promise<void>((r) => setTimeout(r, lockSpinMs));
-        continue;
-      }
-      // EEXIST: another writer holds the lock — or its previous holder crashed.
-      try {
-        const stat = fs.statSync(lockPath);
-        const age = Date.now() - stat.mtimeMs;
-        if (age > lockStaleMs) {
-          logger.warn({ lockPath, ageMs: age }, "removing stale lock");
-          try { fs.rmdirSync(lockPath); } catch { /* race with another writer is fine */ }
-        }
-      } catch {
-        // lock disappeared between EEXIST and statSync — race is fine, just retry
-      }
-      await new Promise<void>((r) => setTimeout(r, lockSpinMs + Math.floor(Math.random() * lockSpinMs)));
-      continue;
-    }
+    // Step 0a: Acquire the lock (shared with createDocExclusive — see tryAcquireLockOnce).
+    const lockHeld = await tryAcquireLockOnce(lockPath);
+    if (!lockHeld) continue;
 
     try {
       // Step 1: Read with resilience

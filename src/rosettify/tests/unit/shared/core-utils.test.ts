@@ -172,6 +172,17 @@ describe("findStep", () => {
   it("returns undefined for missing step", () => {
     expect(findStep(fullPlan(), "nope")).toBeUndefined();
   });
+
+  // A5/FR-PLAN-0015(1) — a phase appended without a `steps` array (e.g. one merged in from an
+  // entire_plan patch before defaults are normalized) must not crash the lookup. Before the fix
+  // this threw "Cannot read properties of undefined (reading 'find')" instead of returning
+  // undefined, which surfaced to callers as an internal_error instead of target_not_found.
+  it("does not throw when a phase has no `steps` array (A5)", () => {
+    const plan = fullPlan();
+    delete (plan.phases[0] as unknown as Record<string, unknown>)["steps"];
+    expect(() => findStep(plan, "zz")).not.toThrow();
+    expect(findStep(plan, "zz")).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -354,6 +365,22 @@ describe("validateDependencies", () => {
       ],
     };
     expect(validateDependencies(plan)).toBe("dependency_cycle");
+  });
+
+  // A7/FR-PLAN-0001/FR-PLAN-0004 — phase ids and step ids are separate namespaces: a step
+  // depending on a phase id (or vice versa) is unknown_dependency, not a valid cross-kind
+  // reference. Before the fix, a single combined id set accepted both, so such a plan validated
+  // cleanly but the step could never become ready (buildStepStatusMap never contains phase ids).
+  it("returns unknown_dependency when a step depends_on a phase id (A7)", () => {
+    const plan = fullPlan();
+    plan.phases[0]!.steps[0]!.depends_on = ["p1"]; // s1 depends on its own phase id, not a step id
+    expect(validateDependencies(plan)).toBe("unknown_dependency");
+  });
+
+  it("returns unknown_dependency when a phase depends_on a step id (A7)", () => {
+    const plan = fullPlan();
+    plan.phases[1]!.depends_on = ["s1"]; // p2 depends on a step id, not a phase id
+    expect(validateDependencies(plan)).toBe("unknown_dependency");
   });
 });
 

@@ -1,18 +1,19 @@
 // Implements FR-PLAN-0010 (create subcommand) and FR-PLAN-0040 (compressed-tree output).
 // Uses FR-PLAN-0024 write cycle (first-create path: direct write, previous_version=null).
 
+import * as fs from "fs";
 import type { RunEnvelope } from "../../registry/types.js";
 import { ok, err } from "../../shared/envelope.js";
 import { logger } from "../../shared/logger.js";
+import { atomicWriteWithBackup } from "../../shared/doc-io.js";
 import {
   type Plan,
-  type Phase,
-  type Step,
   validateUniqueIds,
   validateDependencies,
   validateSizeLimits,
   propagateStatuses,
   savePlan,
+  normalizePhase,
 } from "./core.js";
 import { buildPlanWriteResult, type PlanWriteResult } from "./output.js";
 
@@ -45,23 +46,10 @@ export async function cmdCreate(
       ? (data["phases"] as Record<string, unknown>[])
       : [];
 
-    const phases: Phase[] = rawPhases.map((p) => {
-      const rawSteps = Array.isArray(p["steps"])
-        ? (p["steps"] as Record<string, unknown>[])
-        : [];
-      const steps: Step[] = rawSteps.map((s) => ({
-        status: "open",
-        depends_on: [],
-        ...(s as Partial<Step>),
-      } as Step));
-
-      const phaseBase = {
-        status: "open",
-        depends_on: [],
-        ...(p as Partial<Phase>),
-      };
-      return { ...phaseBase, steps } as Phase;
-    });
+    // A5/FR-PLAN-0001 — normalizePhase/normalizeStep are the single source of the create-time
+    // defaults (status:"open", depends_on:[], steps:[], description:""), also reused by upsert
+    // wherever it appends a brand-new phase or step.
+    const phases = rawPhases.map((p) => normalizePhase(p));
 
     const plan: Plan = {
       name: (data["name"] as string | undefined) ?? "Unnamed Plan",
@@ -84,12 +72,35 @@ export async function cmdCreate(
     if (sizeErr) return err(sizeErr);
 
     propagateStatuses(plan);
-    // FR-PLAN-0026 — savePlan writes pretty-formatted JSON (2-space indent)
-    savePlan(planFile, plan);
 
-    logger.info({ planFile, name: plan.name }, "plan created");
-    // FR-PLAN-0040 — return PlanWriteResult shape (plan + phases); previous_version=null on first create (FR-PLAN-0010)
-    return ok(buildPlanWriteResult(plan, null));
+    if (!fs.existsSync(planFile)) {
+      // FR-PLAN-0010 / FR-PLAN-0024 — first-ever create: skip the backup cycle entirely,
+      // previous_version stays null.
+      savePlan(planFile, plan);
+      logger.info({ planFile, name: plan.name }, "plan created");
+      // FR-PLAN-0040 — return PlanWriteResult shape (plan + phases); previous_version=null on first create (FR-PLAN-0010)
+      return ok(buildPlanWriteResult(plan, null));
+    }
+
+    // A2 — `plan create` on a file that already exists must not silently overwrite it with no
+    // recovery path. Route through the same rename-as-guard write cycle as `upsert`
+    // (FR-PLAN-0024): the on-disk content is backed up to a `.bakNNN` file and `previous_version`
+    // is set to it, while the user-visible outcome (the file now holds this newly-built plan)
+    // is unchanged from the old overwrite behavior.
+    const writeResult = await atomicWriteWithBackup<Plan, PlanWriteResult>(
+      planFile,
+      (_current) => ({ ok: true, result: buildPlanWriteResult(plan, null), updated: plan }),
+      savePlan,
+    );
+
+    if (!writeResult.ok) {
+      return { ok: false, result: null, error: writeResult.error, include_help: writeResult.include_help };
+    }
+
+    const tree = writeResult.result!.result;
+    const bak = writeResult.result!.backupPath;
+    logger.info({ planFile, name: plan.name, backupPath: bak }, "plan created (existing file backed up)");
+    return ok({ ...tree, plan: { ...tree.plan, previous_version: bak } });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return err(`internal_error: ${msg}`);

@@ -6,7 +6,7 @@
 import * as fs from "fs";
 import type { RunEnvelope } from "../../registry/types.js";
 import { ok, err } from "../../shared/envelope.js";
-import { atomicWriteWithBackup } from "../../shared/doc-io.js";
+import { atomicWriteWithBackup, createDocExclusive } from "../../shared/doc-io.js";
 import { resolveActor } from "../../shared/actor.js";
 import { nowUtcZ } from "../../shared/time.js";
 import {
@@ -97,8 +97,18 @@ export async function applyBatchWrite<T>(
     if (!opts?.system) return err(ERR_MISSING_SYSTEM, true); // absent-argument usage error, like missing_data
     const outcome = mutateFn(newDocument(opts.system));
     if (!outcome.ok) return err(outcome.error);
-    saveSpecs(file, outcome.updated); // previous_version stays null on first create
-    return ok({ result: outcome.result, previous_version: null });
+
+    // A2/FR-PLAN-0024 (mirrored for specs) — the existsSync check above is not itself
+    // exclusive: two concurrent `add --system ...` calls can both observe a missing file and
+    // both try to create it. createDocExclusive takes the same `.lock` mutex as
+    // atomicWriteWithBackup and re-checks under the lock, so only one caller actually creates
+    // the document. The loser (created:false) falls through to atomicWriteWithBackup below,
+    // which re-runs mutateFn against the document the winner just created instead of this
+    // call's write being silently lost.
+    const created = await createDocExclusive<SpecsDocument>(file, () => outcome.updated, saveSpecs);
+    if (created.created) {
+      return ok({ result: outcome.result, previous_version: null }); // previous_version stays null on first create
+    }
   }
 
   const writeResult = await atomicWriteWithBackup<SpecsDocument, T>(file, mutateFn, saveSpecs, {

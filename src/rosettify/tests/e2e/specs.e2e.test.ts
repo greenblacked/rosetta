@@ -411,3 +411,54 @@ describe("CLI — specs error cases", () => {
     expect((r.json as { error: string }).error).toContain("missing_id");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Multi-process concurrent first-create (A2 / FR-SPECS-0002 mirrors FR-PLAN-0024)
+// ---------------------------------------------------------------------------
+
+// A2 — `specs add --system ...` on a missing file is a first-create write. Before the fix, the
+// `!fs.existsSync(file)` check and the direct `saveSpecs` write that followed it were not
+// mutually exclusive: concurrent callers could all observe a missing file and each write
+// directly, so only the last writer's spec survived even though every call reported success.
+describe("CLI — concurrent first-create (A2 / FR-SPECS-0002)", () => {
+  it("10 concurrent `specs add --system` processes against one missing file: no lost writes", async () => {
+    const N = 10;
+    const file = specsFile("concurrent.json");
+
+    const { spawn } = await import("child_process");
+    const exitCodes: number[] = await Promise.all(
+      Array.from({ length: N }, (_, i) => {
+        const id = `FR-CHK-${String(1000 + i).padStart(4, "0")}`;
+        const item = JSON.stringify({
+          id,
+          type: "FR",
+          title: `Concurrent spec ${i}`,
+          statement: "When something happens, the system shall do a thing.",
+          source: "User",
+          priority: "Must",
+          verification: "Test",
+          acceptance: [{ ears: "event", when: "something happens", system: "the checkout service", shall: "do a thing" }],
+        });
+        const args = [BIN, "specs", "add", file, item, "--system", "checkout"];
+        return new Promise<number>((resolve) => {
+          const child = spawn(NODE, args, { stdio: "pipe" });
+          child.on("close", (code) => resolve(code ?? -1));
+        });
+      }),
+    );
+
+    expect(exitCodes.every((c) => c === 0)).toBe(true);
+
+    const finalDoc = JSON.parse(fs.readFileSync(file, "utf8")) as { specs: { id: string }[] };
+    const ids = new Set(finalDoc.specs.map((s) => s.id));
+    for (let i = 0; i < N; i++) {
+      const id = `FR-CHK-${String(1000 + i).padStart(4, "0")}`;
+      expect(ids.has(id), `lost write: ${id} reported success but not in final document`).toBe(true);
+    }
+
+    // No leftover lock directory or tmp files (A3).
+    expect(fs.existsSync(file + ".lock")).toBe(false);
+    const leftovers = fs.readdirSync(path.dirname(file)).filter((n) => n.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+  }, 60_000);
+});

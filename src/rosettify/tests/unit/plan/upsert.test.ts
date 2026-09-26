@@ -320,3 +320,119 @@ describe("cmdUpsert — immutable_id (FR-PLAN-0015)", () => {
     expect(plan.phases[0]!.steps[0]!.name).toBe("Same ID is OK");
   });
 });
+
+// ---------------------------------------------------------------------------
+// A4/FR-PLAN-0015 — entire_plan patch with nested `steps` merges by id instead of
+// replacing the phase's whole step list (mergePhasePatch, shared with the phase-target branch).
+// ---------------------------------------------------------------------------
+
+describe("cmdUpsert — A4: entire_plan nested-steps merge by id", () => {
+  it("keeps s1's prompt/status, keeps s2, and appends a new step with defaults", async () => {
+    const file = writePlan();
+    // Simulate progress: s1 already complete before the entire_plan patch renames it.
+    const before = loadPlan(file)!;
+    before.phases[0]!.steps[0]!.status = "complete";
+    savePlan(file, before);
+
+    const result = await cmdUpsert(file, "entire_plan", {
+      phases: [
+        {
+          id: "p1",
+          steps: [
+            { id: "s1", name: "renamed" },
+            { id: "s-new", name: "Brand new step", prompt: "do it" },
+          ],
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+
+    const plan = loadPlan(file)!;
+    const p1 = plan.phases.find((p) => p.id === "p1")!;
+    const s1 = p1.steps.find((s) => s.id === "s1")!;
+    const s2 = p1.steps.find((s) => s.id === "s2");
+    const sNew = p1.steps.find((s) => s.id === "s-new");
+
+    // s1: renamed, but its prompt, depends_on and status survive the patch (not replaced).
+    expect(s1.name).toBe("renamed");
+    expect(s1.prompt).toBe(fullPlan().phases[0]!.steps[0]!.prompt);
+    expect(s1.status).toBe("complete");
+    expect(s1.depends_on).toEqual(fullPlan().phases[0]!.steps[0]!.depends_on);
+
+    // s2 (not mentioned in the patch) is not deleted — mergeById appends/keeps, never replaces.
+    expect(s2).toBeDefined();
+
+    // A5 — the newly-appended step gets create-time defaults.
+    expect(sNew).toBeDefined();
+    expect(sNew!.status).toBe("open");
+    expect(sNew!.depends_on).toEqual([]);
+  });
+
+  it("merges an existing phase's non-steps fields via mergePatch alongside the steps merge", async () => {
+    const file = writePlan();
+    const result = await cmdUpsert(file, "entire_plan", {
+      phases: [{ id: "p1", description: "updated description", steps: [{ id: "s1", name: "X" }] }],
+    });
+    expect(result.ok).toBe(true);
+    const plan = loadPlan(file)!;
+    const p1 = plan.phases.find((p) => p.id === "p1")!;
+    expect(p1.description).toBe("updated description");
+    expect(p1.steps.find((s) => s.id === "s1")!.name).toBe("X");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A5/FR-PLAN-0001/FR-PLAN-0015(1) — upserted phases/steps get create-time defaults, so a later
+// upsert or update_status against them does not crash with internal_error.
+// ---------------------------------------------------------------------------
+
+describe("cmdUpsert — A5: defaults on newly-appended phases/steps", () => {
+  it("entire_plan patch appending a brand-new phase gets full create-time defaults", async () => {
+    const file = planFile("r5.json");
+    const created = await cmdUpsert(file, "entire_plan", { name: "x", phases: [{ id: "p1", name: "P1" }] });
+    expect(created.ok).toBe(true);
+
+    const plan = loadPlan(file)!;
+    const p1 = plan.phases.find((p) => p.id === "p1")!;
+    expect(p1.status).toBe("open");
+    expect(p1.depends_on).toEqual([]);
+    expect(p1.steps).toEqual([]);
+    expect(p1.description).toBe("");
+
+    // Following upsert against an unknown target with no kind: missing_kind, not internal_error.
+    const noKind = await cmdUpsert(file, "snew", { name: "n" });
+    expect(noKind.ok).toBe(false);
+    expect(noKind.error).toBe("missing_kind");
+
+    // update_status against an unknown id: target_not_found, not internal_error (findStep is
+    // tolerant of a phase with no `steps`/normalized shape — see core-utils.test.ts for the
+    // direct findStep regression).
+    const { cmdUpdateStatus } = await import("../../../src/commands/plan/update-status.js");
+    const badStatus = await cmdUpdateStatus(file, "zz", "complete");
+    expect(badStatus.ok).toBe(false);
+    expect(badStatus.error).toBe("target_not_found");
+  });
+
+  it("phase-target patch appending a new step (kind=step) gets defaults", async () => {
+    const file = writePlan();
+    const result = await cmdUpsert(file, "s-brand-new", { name: "Brand New" }, "step", "p1");
+    expect(result.ok).toBe(true);
+    const plan = loadPlan(file)!;
+    const step = plan.phases.find((p) => p.id === "p1")!.steps.find((s) => s.id === "s-brand-new")!;
+    expect(step.status).toBe("open");
+    expect(step.depends_on).toEqual([]);
+  });
+
+  it("insert new phase (kind=phase) with no name in patch defaults name to the target id", async () => {
+    const file = writePlan();
+    const result = await cmdUpsert(file, "p-defaulted", {}, "phase");
+    expect(result.ok).toBe(true);
+    const plan = loadPlan(file)!;
+    const phase = plan.phases.find((p) => p.id === "p-defaulted")!;
+    expect(phase.name).toBe("p-defaulted");
+    expect(phase.status).toBe("open");
+    expect(phase.depends_on).toEqual([]);
+    expect(phase.steps).toEqual([]);
+    expect(phase.description).toBe("");
+  });
+});
