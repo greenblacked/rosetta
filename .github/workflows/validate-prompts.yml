@@ -74,10 +74,17 @@ jobs:
       TARGET_BASE_REF: ${{ github.event.pull_request.base.ref }}
 
     steps:
+      # pull_request_target always checks out `main` (the base repo), never the
+      # fork's ref, so every local action and script below is trusted code --
+      # see the "Checkout PR content" step below for the PR content itself.
+      # workflow_dispatch has no PR/fork to protect against, and the whole
+      # point of dispatching a branch is to validate THAT branch, so it checks
+      # out the dispatched ref (github.ref) instead of hard-coding main (R3):
+      # dispatching on branch X must audit X, not silently audit main.
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'main' }}
           fetch-depth: 0 # Fetch all history to compare with base branch
 
       # Fork content lands in pr/ as data the auditor READS -- nothing here builds,
@@ -138,6 +145,17 @@ jobs:
             git -C "$PR_DIR" remote add base "https://github.com/$GITHUB_REPOSITORY.git"
             git -C "$PR_DIR" fetch base "$BASE_BRANCH"
             BASE_REF="base/$BASE_BRANCH"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # No PR base ref on a manual dispatch. HEAD^ (the immediate parent
+            # commit) is the wrong comparison here: dispatching a long-lived
+            # feature branch would only ever see its last commit's worth of
+            # changes, not everything the branch has accumulated relative to
+            # main. Diff against origin/main instead. The checkout step above
+            # only fetched the dispatched ref's history, so fetch main
+            # explicitly (fetch-depth: 0 there means this is a full, unshallow
+            # fetch, not a shallow one that would need extra depth) (R3).
+            git -C "$PR_DIR" fetch origin main
+            BASE_REF="origin/main"
           else
             BASE_REF="HEAD^"
           fi
