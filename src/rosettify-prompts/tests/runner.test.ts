@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { runBenchSuite, validateEvalResultItem } from '../src/runner.js';
 import type Anthropic from '@anthropic-ai/sdk';
+import { APIError } from '@anthropic-ai/sdk';
 import type { BenchConfig } from '../src/types.js';
 
 // C7: runner.ts routes every messages call through `.stream(params).finalMessage()`
@@ -585,6 +586,74 @@ describe('C7: streaming client + non-retryable status-less errors', () => {
 
     const runs = await runBenchSuite(client, config);
     expect(runs[0].error).toMatch(/non-retryable, status-less error/);
+    expect(calls).toBe(1);
+  });
+});
+
+describe('R2: mid-stream SSE `error` events (status-less APIError)', () => {
+  it('retries a status-less APIError with a transient error type (overloaded_error) and succeeds', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: {
+        stream() {
+          calls++;
+          return {
+            finalMessage: async () => {
+              if (calls === 1) {
+                // Mirrors the SDK's mid-stream SSE `error` event handling in
+                // core/streaming.ts: `new APIError(undefined, body, undefined, headers, type)`.
+                throw new APIError(undefined, { error: { type: 'overloaded_error' } }, undefined, undefined, 'overloaded_error');
+              }
+              return {
+                content: [{ type: 'text', text: 'answer' }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+                stop_reason: 'end_turn',
+              };
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const [run] = await runBenchSuite(client, config);
+    expect(run.error).toBeUndefined();
+    expect(run.turns[0].assistantText).toBe('answer');
+    expect(calls).toBe(2);
+  });
+
+  it('does not retry a status-less APIError with a non-transient error type (invalid_request_error)', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: {
+        stream() {
+          calls++;
+          return {
+            finalMessage: async () => {
+              throw new APIError(undefined, { error: { type: 'invalid_request_error' } }, undefined, undefined, 'invalid_request_error');
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const runs = await runBenchSuite(client, config);
+    expect(runs[0].error).toMatch(/invalid_request_error/);
     expect(calls).toBe(1);
   });
 });

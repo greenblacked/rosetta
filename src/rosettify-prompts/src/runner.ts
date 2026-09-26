@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { APIConnectionError, APIConnectionTimeoutError } from '@anthropic-ai/sdk';
+import { APIConnectionError, APIConnectionTimeoutError, APIError } from '@anthropic-ai/sdk';
 import type {
   BenchConfig,
   EvalAssertionConfig,
@@ -15,6 +15,12 @@ import { computeCostUsd } from './pricing.js';
 import { renderDataBlock } from './delimiters.js';
 
 const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
+/** `error.type` values the SDK attaches to a status-less APIError it throws for a mid-stream SSE
+ * `error` event (see @anthropic-ai/sdk core/streaming.ts: `new APIError(undefined, body, ...,
+ * type)`). These mirror server-side/transient failures and should be retried like their HTTP-status
+ * equivalents; anything else status-less (e.g. the SDK's own pre-flight "Streaming is required"
+ * error, or invalid_request_error) is a client-side/non-transient failure and must not be retried. */
+const RETRYABLE_STREAM_ERROR_TYPES = new Set(['overloaded_error', 'api_error', 'rate_limit_error']);
 /** Retry a transient API failure up to this many times (exponential backoff) before giving up. */
 const MAX_RETRIES = 3;
 
@@ -74,10 +80,13 @@ async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promis
     } catch (err) {
       attempt++;
       const status = (err as { status?: number } | undefined)?.status;
+      const isRetryableStreamError =
+        err instanceof APIError && err.status === undefined && !!err.type && RETRYABLE_STREAM_ERROR_TYPES.has(err.type);
       const isRetryable =
         (status !== undefined && RETRYABLE_STATUS.has(status)) ||
         err instanceof APIConnectionError ||
-        err instanceof APIConnectionTimeoutError;
+        err instanceof APIConnectionTimeoutError ||
+        isRetryableStreamError;
       if (attempt > retries || !isRetryable) {
         throw err;
       }
