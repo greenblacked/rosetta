@@ -1,11 +1,23 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import { getProvider, parseModelRef, providers } from '../../src/llm/providers';
 import { defaultEnvFilePath, parseDotEnv, resolveBaseUrls, resolveKeys } from '../../src/llm/keys';
 import { trialSpecSchema } from '../../src/shared/ipc';
 import { ConfigError } from '../../src/shared/errors';
+
+// E5: every mkdtemp'd `.env`-holding dir this file creates is tracked here and removed
+// afterward.
+const createdDirs: string[] = [];
+afterAll(() => {
+  for (const d of createdDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+function envDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'curio-env-'));
+  createdDirs.push(dir);
+  return dir;
+}
 
 describe('provider map (§5.6)', () => {
   it('parses "provider/model" refs (model id may contain slashes)', () => {
@@ -98,7 +110,7 @@ describe('key resolution (§12)', () => {
   });
 
   it('falls back to the provider-standard var, then to the .env file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'curio-env-'));
+    const dir = envDir();
     const envFile = join(dir, '.env');
     writeFileSync(envFile, 'OPENAI_API_KEY=sk-from-file\n');
 
@@ -117,7 +129,7 @@ describe('key resolution (§12)', () => {
     // and only by name within a source — never ".env file CURIOCITY var" ahead of
     // "process.env standard var". Otherwise a stale local .env value could shadow a
     // live CI-injected key, e.g. sending a run to the wrong account/key silently.
-    const dir = mkdtempSync(join(tmpdir(), 'curio-env-'));
+    const dir = envDir();
     const envFile = join(dir, '.env');
     writeFileSync(envFile, 'CURIOCITY_ANTHROPIC_KEY=sk-stale-from-file\n');
 
@@ -126,7 +138,7 @@ describe('key resolution (§12)', () => {
   });
 
   it('the .env file is consulted only when the environment has neither name (both name orders)', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'curio-env-'));
+    const dir = envDir();
     const envFile = join(dir, '.env');
     writeFileSync(envFile, 'CURIOCITY_ANTHROPIC_KEY=sk-curio-from-file\nOPENAI_API_KEY=sk-standard-from-file\n');
 
@@ -162,7 +174,7 @@ describe('base URL resolution (§12/Bifrost)', () => {
   });
 
   it('falls back to the .env file with the same name order when env has no base URL', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'curio-env-'));
+    const dir = envDir();
     const envFile = join(dir, '.env');
     writeFileSync(
       envFile,
@@ -179,7 +191,7 @@ describe('base URL resolution (§12/Bifrost)', () => {
   });
 
   it('a live env base URL outranks a stale provider-specific .env value', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'curio-env-'));
+    const dir = envDir();
     const envFile = join(dir, '.env');
     writeFileSync(envFile, 'CURIOCITY_OPENAI_BASE_URL=https://stale-file.example\n');
 

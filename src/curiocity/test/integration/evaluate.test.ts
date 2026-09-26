@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import { buildMatrix } from '../../src/config/matrix';
 import { resolveCaseConfig } from '../../src/config/merge';
 import { caseConfigSchema, topLevelConfigSchema, type GateConfig, type PricingMap } from '../../src/config/schema';
@@ -14,7 +14,16 @@ import type { FakeRouterScript } from '../../src/shared/model-router';
 import { makeUsage } from '../../src/shared/trajectory';
 import type { StatBlock } from '../../src/results/schema';
 import { ExitCode } from '../../src/cli/exit-codes';
-import { mockProfile, tmpRunDir } from './helpers';
+import { cleanupTmpRunDirs, listTmpAgentDirs, mockProfile, sweepNewTmpAgentDirs, tmpRunDir } from './helpers';
+
+// E5: this file (like suite/cli-run/interaction) mints `curio-test-run-*` dirs via
+// `tmpRunDir()` and, for its eval-error case, a retained `curiocity-ws-*`/`curiocity-ctrl-*`
+// pair (§7 retention) — sweep/clean up both so a full vitest run shows no growth.
+const tmpBaseline = new Set(listTmpAgentDirs());
+afterAll(() => {
+  sweepNewTmpAgentDirs(tmpBaseline);
+  cleanupTmpRunDirs();
+});
 
 /**
  * Integration (§7 step 7 / §11 / §12 / §13 / D8): the evaluate pipeline end-to-end

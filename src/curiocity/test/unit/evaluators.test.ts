@@ -1,8 +1,8 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { describe, it, expect, vi } from 'vitest';
+import { afterAll, describe, it, expect, vi } from 'vitest';
 import { fileExists } from '../../src/evaluators/file-exists';
 import { command } from '../../src/evaluators/command';
 import { trajectoryCheck, resolveToolPattern } from '../../src/evaluators/trajectory-check';
@@ -19,8 +19,16 @@ import { FakeModelRouter } from '../../src/shared/model-router';
 import { ConfigError } from '../../src/shared/errors';
 import type { TrajectoryEvent } from '../../src/shared/trajectory';
 
+// E5: every mkdtemp'd workspace below (`workspaceWith` and `ctx`) is tracked here and
+// removed afterward.
+const createdDirs: string[] = [];
+afterAll(() => {
+  for (const d of createdDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function workspaceWith(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'curio-eval-'));
+  createdDirs.push(dir);
   for (const [rel, content] of Object.entries(files)) {
     const full = join(dir, rel);
     mkdirSync(join(full, '..'), { recursive: true });
@@ -30,8 +38,13 @@ function workspaceWith(files: Record<string, string>): string {
 }
 
 function ctx(over: Partial<EvalContext>): EvalContext {
+  let workspace = over.workspace;
+  if (workspace === undefined) {
+    workspace = mkdtempSync(join(tmpdir(), 'curio-eval-'));
+    createdDirs.push(workspace);
+  }
   return {
-    workspace: over.workspace ?? mkdtempSync(join(tmpdir(), 'curio-eval-')),
+    workspace,
     workspaceDiff: over.workspaceDiff ?? '',
     events: over.events ?? [],
     qnaLog: over.qnaLog ?? [],

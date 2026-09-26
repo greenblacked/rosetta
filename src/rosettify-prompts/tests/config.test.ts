@@ -1,8 +1,8 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { loadConfig, parseConfig } from '../src/config.js';
 
 const REQUIRED_VARIANT_TEXT =
@@ -173,8 +173,21 @@ describe('parseConfig', () => {
 });
 
 describe('loadConfig', () => {
-  function tmpFile(name: string, contents: string): string {
+  // E5: track every mkdtemp'd dir this describe block creates and remove them all
+  // afterward, so this suite leaks no directories into /tmp.
+  const createdDirs: string[] = [];
+  afterAll(() => {
+    for (const d of createdDirs) rmSync(d, { recursive: true, force: true });
+  });
+
+  function tmpDir(): string {
     const dir = mkdtempSync(path.join(tmpdir(), 'rosettify-prompts-test-'));
+    createdDirs.push(dir);
+    return dir;
+  }
+
+  function tmpFile(name: string, contents: string): string {
+    const dir = tmpDir();
     const file = path.join(dir, name);
     writeFileSync(file, contents, 'utf-8');
     return file;
@@ -200,7 +213,7 @@ describe('loadConfig', () => {
   });
 
   it('reads config-declared supporting files relative to the config file', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'rosettify-prompts-test-'));
+    const dir = tmpDir();
     writeFileSync(path.join(dir, 'ref.md'), 'REF BODY', 'utf-8');
     writeFileSync(path.join(dir, 'evals.json'), JSON.stringify(minimalSuite({ supporting: ['ref.md'] })), 'utf-8');
     const config = loadConfig(path.join(dir, 'evals.json'));
@@ -210,7 +223,7 @@ describe('loadConfig', () => {
   });
 
   it('gives a clean error when a supporting file is missing', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'rosettify-prompts-test-'));
+    const dir = tmpDir();
     writeFileSync(path.join(dir, 'evals.json'), JSON.stringify(minimalSuite({ supporting: ['nope.md'] })), 'utf-8');
     expect(() => loadConfig(path.join(dir, 'evals.json'))).toThrow(/Could not read supporting file "nope\.md"/);
   });
