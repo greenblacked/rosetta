@@ -273,6 +273,69 @@ describe("cmdCreate — FR-PLAN-0010 / FR-PLAN-0040", () => {
     expect(result.error).toContain("internal_error");
   });
 
+  // R4 — `plan create` on an existing but corrupted/truncated plan file must still succeed: the
+  // corrupted bytes are backed up (.bakNNN) and previous_version is set, under the same
+  // rename-as-guard lock as upsert. Before the fix, atomicWriteWithBackup's read step always
+  // returned plan_file_corrupted for a JSON parse failure, so a truncated plan.json could never
+  // be recreated by `plan create` again.
+  it("R4: recreates a corrupted existing plan file, backing up the corrupted bytes", async () => {
+    const file = planFile();
+    fs.writeFileSync(file, "{{not valid json{{");
+
+    const result = await cmdCreate(file, { name: "Recreated Plan" });
+    expect(result.ok).toBe(true);
+    const tree = result.result as PlanWriteResult;
+    expect(tree.plan.name).toBe("Recreated Plan");
+    // previous_version points at a backup of the corrupted content, not null
+    expect(tree.plan.previous_version).not.toBeNull();
+    expect(tree.plan.previous_version).toMatch(/\.bak\d+$/);
+
+    // The new plan file on disk is valid and holds the new content
+    const plan = loadPlan(file)!;
+    expect(plan.name).toBe("Recreated Plan");
+    expect(plan.previous_version).toBe(tree.plan.previous_version);
+
+    // The corrupted bytes were preserved in the backup file, not discarded
+    const backupContent = fs.readFileSync(plan.previous_version!, "utf8");
+    expect(backupContent).toBe("{{not valid json{{");
+  });
+
+  // R5 — the first-create path must go through the same `.lock` mutex as upsert/specs
+  // (createDocExclusive), not an unlocked existsSync+savePlan pair. A true two-process race
+  // against that unlocked pair only has a nanosecond-scale window (a single synchronous branch
+  // with no interleaving point), so it can't be reproduced reliably by racing two real writers.
+  // Instead this asserts the mechanism directly and deterministically: with another writer's
+  // `.lock` directory already held, a lock-respecting first-create must not be able to write
+  // until that lock is released, whereas the old unlocked `fs.existsSync` check does not consult
+  // the lock file at all and would write immediately, ignoring it.
+  it("R5: first-create respects the `.lock` mutex like upsert/specs (does not write while it is externally held)", async () => {
+    const file = planFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const lockPath = file + ".lock";
+    fs.mkdirSync(lockPath); // simulate another writer already mid-cycle for this same path
+
+    const releaseAfterMs = 200;
+    const releaseTimer = setTimeout(() => fs.rmdirSync(lockPath), releaseAfterMs);
+    try {
+      const start = Date.now();
+      const result = await cmdCreate(file, { name: "Waits For Lock" });
+      const elapsed = Date.now() - start;
+
+      expect(result.ok).toBe(true);
+      // Must not have written before the external holder released the lock: the old unlocked
+      // existsSync+savePlan path ignores `.lock` entirely and would complete in a few ms.
+      expect(elapsed).toBeGreaterThanOrEqual(releaseAfterMs - 20);
+      expect(loadPlan(file)!.name).toBe("Waits For Lock");
+    } finally {
+      clearTimeout(releaseTimer);
+      try {
+        fs.rmdirSync(lockPath);
+      } catch {
+        // already released by the timer — fine
+      }
+    }
+  });
+
   it("idempotent: second create overwrites with new name (NFR-REL-0002)", async () => {
     const file = planFile();
 
