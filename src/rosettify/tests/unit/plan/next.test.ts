@@ -197,12 +197,30 @@ describe("cmdNext — status grouping", () => {
 // ---------------------------------------------------------------------------
 
 describe("cmdNext — target_id scoping", () => {
-  it("scopes to specified phase regardless of phase-1 state", async () => {
+  // A6/FR-PLAN-0004/FR-PLAN-0011 — target_id scopes the *step* listing to one phase, but it
+  // must not bypass that phase's own depends_on: p2 depends_on ["p1"], and p1 is not complete
+  // (its status field is literally "open" here, independent of its steps' own statuses), so a
+  // target_id=p2 request must return no steps even though s3's step-level dep on s1 is satisfied.
+  it("does not bypass the targeted phase's own depends_on (phase not complete)", async () => {
     const plan = fullPlan();
-    // Phase 2 is not yet unblocked (phase 1 incomplete), but target_id bypasses sequential check
-    // First mark s1 complete so s3's step dep is satisfied
     plan.phases[0]!.steps[0]!.status = "complete";
-    // Phase 1 still not complete (s2 is open)
+    // plan.phases[0]! ("p1") keeps its fixture default status of "open".
+    const file = writePlan(plan);
+    const result = await cmdNext(file, "p2");
+    expect(result.ok).toBe(true);
+    const ids = result.result!.next.map((s) => s.id);
+    expect(ids).not.toContain("s3");
+    expect(ids).not.toContain("s1");
+    expect(ids).not.toContain("s2");
+  });
+
+  // Counterpart: once p1 (the depended-on phase) is complete, target_id=p2 does return p2's
+  // ready steps, still excluding p1's own steps from the result (scoping still applies).
+  it("scopes to specified phase once that phase's own depends_on are satisfied", async () => {
+    const plan = fullPlan();
+    plan.phases[0]!.steps[0]!.status = "complete";
+    plan.phases[0]!.steps[1]!.status = "complete";
+    plan.phases[0]!.status = "complete"; // p1 fully complete — p2's phase dep now satisfied
     const file = writePlan(plan);
     const result = await cmdNext(file, "p2");
     expect(result.ok).toBe(true);

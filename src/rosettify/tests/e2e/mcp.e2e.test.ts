@@ -341,8 +341,11 @@ describe("MCP — plan next with target_id", () => {
             id: "p1",
             name: "Phase 1",
             description: "",
+            // A6/FR-PLAN-0004 — p2 depends_on p1, so p1's step must be complete for a
+            // target_id=p2 request to return anything; a step-only check previously let p2's
+            // steps through even while p1 was open.
             steps: [
-              { id: "s1", name: "S1", prompt: "p" },
+              { id: "s1", name: "S1", prompt: "p", status: "complete" },
             ],
           },
           {
@@ -365,6 +368,41 @@ describe("MCP — plan next with target_id", () => {
     const res = r.payload as { next: { id: string }[] };
     expect(res.next.some((s) => s.id === "s2")).toBe(true);
     expect(res.next.some((s) => s.id === "s1")).toBe(false);
+  });
+
+  it("A6/FR-PLAN-0004 — target_id does not bypass the targeted phase's own depends_on", async () => {
+    const file = planFile("target-blocked.json");
+    await client.callTool("plan", {
+      subcommand: "create",
+      plan_file: file,
+      data: {
+        name: "Target Blocked Test",
+        phases: [
+          {
+            id: "p1",
+            name: "Phase 1",
+            description: "",
+            steps: [{ id: "s1", name: "S1", prompt: "p" }], // left open — p1 is not complete
+          },
+          {
+            id: "p2",
+            name: "Phase 2",
+            description: "",
+            depends_on: ["p1"],
+            steps: [{ id: "s2", name: "S2", prompt: "p" }],
+          },
+        ],
+      },
+    });
+
+    const r = await client.callTool("plan", {
+      subcommand: "next",
+      plan_file: file,
+      target_id: "p2",
+    });
+    expect(r.isError).toBe(false);
+    const res = r.payload as { next: { id: string }[] };
+    expect(res.next.length).toBe(0);
   });
 
   it("returns target_not_found for nonexistent phase", async () => {
