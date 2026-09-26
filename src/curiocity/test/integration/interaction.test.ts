@@ -1,18 +1,25 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, it, expect } from 'vitest';
 import { runTrial } from '../../src/curion/lifecycle';
 import { buildChildEnv } from '../../src/orchestrator/env';
 import { FakeModelRouter, type FakeRouterScript } from '../../src/shared/model-router';
-import { listTmpAgentDirs, mockSpec, sweepNewTmpAgentDirs, type MockSpecArgs } from './helpers';
+import { cleanupTmpRunDirs, listTmpAgentDirs, mockSpec, sweepNewTmpAgentDirs, type MockSpecArgs } from './helpers';
 
 // Several tests below intentionally produce retained (failed/error) trials whose
 // workspace + ctrl dir are kept per §7. Sweep the ones this file created so a full
 // vitest run shows no `curiocity-ws-*`/`curiocity-ctrl-*` growth (Part 3.3). The
 // production retention rule itself is unchanged.
 const tmpBaseline = new Set(listTmpAgentDirs());
-afterAll(() => sweepNewTmpAgentDirs(tmpBaseline));
+// E5: also remove this file's own `curio-test-run-*` (via tmpRunDir/mockSpec) and
+// `curio-badzip-*` dirs.
+const createdBadZipDirs: string[] = [];
+afterAll(() => {
+  sweepNewTmpAgentDirs(tmpBaseline);
+  cleanupTmpRunDirs();
+  for (const d of createdBadZipDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 /**
  * Interaction-engine coverage (§6). Runs the full trial lifecycle IN-PROCESS with
@@ -137,10 +144,13 @@ describe('§6 interaction engine — trigger table, row by row', () => {
 
   it('row 4 (Stop classified working) → keep waiting, then done → passed', async () => {
     // The intermediate empty-message stop is classified `working` deterministically
-    // (no LLM). If the engine had terminated early, turnCount would be 1, not 2.
+    // (no LLM) — NOT a turn boundary, so it must not close a turn (C9). The engine
+    // keeps waiting past it and only the final `done` stop closes turn 1; had the
+    // engine instead terminated early on the `working` stop, `status` would not be
+    // `passed` (the file write after it would never happen).
     const { result } = await run({ scene: 'working-then-done.json' });
     expect(result.status).toBe('passed');
-    expect(result.turnCount).toBe(2);
+    expect(result.turnCount).toBe(1);
     expect(result.qna).toEqual([]);
   });
 
@@ -251,7 +261,9 @@ describe('§6 interaction engine — trigger table, row by row', () => {
   });
 
   it('launch-error: workspace preparation fails (corrupt src.zip)', async () => {
-    const bad = join(mkdtempSync(join(tmpdir(), 'curio-badzip-')), 'src.zip');
+    const badZipDir = mkdtempSync(join(tmpdir(), 'curio-badzip-'));
+    createdBadZipDirs.push(badZipDir);
+    const bad = join(badZipDir, 'src.zip');
     writeFileSync(bad, 'this is definitely not a zip archive');
     const { result } = await run({ scene: 'clean.json', srcZipPath: bad });
     expect(result.status).toBe('launch-error');

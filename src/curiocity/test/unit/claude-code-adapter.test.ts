@@ -1,7 +1,18 @@
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
+
+// E5: every mkdtemp'd dir this file creates is tracked here and removed afterward.
+const createdDirs: string[] = [];
+afterAll(() => {
+  for (const d of createdDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+function tmpDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  createdDirs.push(dir);
+  return dir;
+}
 import { ClaudeCodeAdapter } from '../../src/agents/claude-code/adapter';
 import { ConfigError } from '../../src/shared/errors';
 import { CLAUDE_CODE_DEFAULT_PROFILE } from '../../src/agents/claude-code/profile';
@@ -309,7 +320,7 @@ describe('ClaudeCodeAdapter — computed-path encoding (§10.1 fallback)', () =>
   it('encodeCwd resolves realpath — the macOS /private symlink case', () => {
     // Build target + a symlink pointing at it; realpath must follow the symlink so the
     // encoding matches how Claude names the projects/<dir> folder for the REAL path.
-    const base = mkdtempSync(join(tmpdir(), 'cc-enc-'));
+    const base = tmpDir('cc-enc-');
     const target = join(base, 'target');
     mkdirSync(target);
     const link = join(base, 'link');
@@ -328,8 +339,8 @@ describe('ClaudeCodeAdapter — computed-path encoding (§10.1 fallback)', () =>
   });
 
   it('locateTranscript: authoritative from session-start payload, else computed fallback', async () => {
-    const ctrlDir = mkdtempSync(join(tmpdir(), 'cc-ctrl-'));
-    const workspace = mkdtempSync(join(tmpdir(), 'cc-ws-'));
+    const ctrlDir = tmpDir('cc-ctrl-');
+    const workspace = tmpDir('cc-ws-');
     const c = ctx({ ctrlDir, workspace, sessionId: 'sid-abc' });
 
     // No ctrl file → computed fallback (through realpath, so /private on macOS).
@@ -378,7 +389,7 @@ describe('ClaudeCodeAdapter — renderHooks (settings file shape vs docs/hooks/c
 
   it('the --settings flag path (profile args) matches the file renderHooks writes', async () => {
     // The profile references {ctrlDir}/settings.json; renderHooks must write that path.
-    const ctrlDir = mkdtempSync(join(tmpdir(), 'cc-ctrl2-'));
+    const ctrlDir = tmpDir('cc-ctrl2-');
     const c = ctx({ ctrlDir });
     const launch = adapter.buildLaunch(c);
     const settingsIdx = launch.args!.indexOf('--settings');

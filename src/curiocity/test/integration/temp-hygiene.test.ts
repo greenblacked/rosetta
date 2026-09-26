@@ -2,7 +2,7 @@ import { afterAll, describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
 import { runTrial } from '../../src/curion/lifecycle';
 import { buildChildEnv } from '../../src/orchestrator/env';
-import { listTmpAgentDirs, mockSpec, sweepNewTmpAgentDirs } from './helpers';
+import { cleanupTmpRunDirs, listTmpAgentDirs, mockSpec, sweepNewTmpAgentDirs } from './helpers';
 
 /**
  * Temp-dir hygiene (Part 3.3). Trials that end in a retained status keep their
@@ -14,7 +14,11 @@ import { listTmpAgentDirs, mockSpec, sweepNewTmpAgentDirs } from './helpers';
 
 const baseEnv = buildChildEnv();
 const baseline = new Set(listTmpAgentDirs());
-afterAll(() => sweepNewTmpAgentDirs(baseline));
+// E5: this file's `mockSpec()` calls also mint `curio-test-run-*` dirs (via `tmpRunDir()`).
+afterAll(() => {
+  sweepNewTmpAgentDirs(baseline);
+  cleanupTmpRunDirs();
+});
 
 describe('temp-dir hygiene (§7 retention + Part 3.3 sweep)', () => {
   it('retains failed-trial workspaces, then the sweep leaves NO growth vs baseline', async () => {

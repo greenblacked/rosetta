@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { APIConnectionError, APIConnectionTimeoutError } from '@anthropic-ai/sdk';
 import type {
   BenchConfig,
   EvalAssertionConfig,
@@ -73,7 +74,11 @@ async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promis
     } catch (err) {
       attempt++;
       const status = (err as { status?: number } | undefined)?.status;
-      if (attempt > retries || (status !== undefined && !RETRYABLE_STATUS.has(status))) {
+      const isRetryable =
+        (status !== undefined && RETRYABLE_STATUS.has(status)) ||
+        err instanceof APIConnectionError ||
+        err instanceof APIConnectionTimeoutError;
+      if (attempt > retries || !isRetryable) {
         throw err;
       }
       const backoffMs = Math.min(1000 * 2 ** attempt, 15_000) + Math.random() * 250;
@@ -225,14 +230,16 @@ async function runIndividualEval(
     try {
       const response = await limit(() =>
         withRetry(() =>
-          client.messages.create({
-            model,
-            max_tokens: 2048,
-            // Judges score, they don't deliberate — disabling thinking keeps the JSON verdict
-            // deterministic and leaves the whole token budget for the output (no truncation).
-            thinking: { type: 'disabled' },
-            messages: [{ role: 'user', content: buildEvalPrompt(assertion, suite.eval?.judgePrompt, turns) }],
-          }),
+          client.messages
+            .stream({
+              model,
+              max_tokens: 2048,
+              // Judges score, they don't deliberate — disabling thinking keeps the JSON verdict
+              // deterministic and leaves the whole token budget for the output (no truncation).
+              thinking: { type: 'disabled' },
+              messages: [{ role: 'user', content: buildEvalPrompt(assertion, suite.eval?.judgePrompt, turns) }],
+            })
+            .finalMessage(),
         ),
       );
       results.push(validateEvalResultItem(extractJsonObject(extractText(response))));
@@ -312,21 +319,23 @@ async function runCombinedEval(
       // as individual mode.
       const response = await limit(() =>
         withRetry(() =>
-          client.messages.create({
-            model,
-            max_tokens: 2048 + candidates.length * 1024,
-            thinking: { type: 'disabled' },
-            messages: [
-              {
-                role: 'user',
-                content: buildCombinedEvalPrompt(
-                  assertion,
-                  suite.eval?.judgePrompt,
-                  candidates.map((c) => ({ variantId: c.variantId, finalText: c.turns[c.turns.length - 1]?.assistantText ?? '' })),
-                ),
-              },
-            ],
-          }),
+          client.messages
+            .stream({
+              model,
+              max_tokens: 2048 + candidates.length * 1024,
+              thinking: { type: 'disabled' },
+              messages: [
+                {
+                  role: 'user',
+                  content: buildCombinedEvalPrompt(
+                    assertion,
+                    suite.eval?.judgePrompt,
+                    candidates.map((c) => ({ variantId: c.variantId, finalText: c.turns[c.turns.length - 1]?.assistantText ?? '' })),
+                  ),
+                },
+              ],
+            })
+            .finalMessage(),
         ),
       );
       // Accept either the requested {"scores":[...]} envelope or a bare top-level array, which
@@ -401,16 +410,18 @@ async function runVariantConversation(
 
       const start = Date.now();
       const response = await withRetry(() =>
-        client.messages.create({
-          model,
-          max_tokens: maxTokens,
-          ...(thinkingParam ? { thinking: thinkingParam } : {}),
-          ...(thinking.enabled && thinking.mode === 'adaptive'
-            ? { output_config: { effort: thinking.effort } }
-            : {}),
-          ...(system ? { system } : {}),
-          messages: history,
-        }),
+        client.messages
+          .stream({
+            model,
+            max_tokens: maxTokens,
+            ...(thinkingParam ? { thinking: thinkingParam } : {}),
+            ...(thinking.enabled && thinking.mode === 'adaptive'
+              ? { output_config: { effort: thinking.effort } }
+              : {}),
+            ...(system ? { system } : {}),
+            messages: history,
+          })
+          .finalMessage(),
       );
       const latencyMs = Date.now() - start;
 

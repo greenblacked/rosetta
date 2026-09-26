@@ -35,6 +35,7 @@ import {
   createWorkspace,
   removeDir,
   snapshotSource,
+  UnsafeSymlinkError,
   unzipSource,
 } from './workspace';
 
@@ -144,7 +145,9 @@ export async function runTrial(spec: TrialSpec, opts: RunTrialOptions): Promise<
       if (spec.srcZipPath) await unzipSource(spec.srcZipPath, workspace);
       else if (spec.srcDir) copySource(spec.srcDir, workspace);
     } catch (err) {
-      status = 'launch-error';
+      // (E3) A case zip whose symlink escapes the workspace is a case-authoring
+      // problem, not a harness/launch failure — surface it as `setup-error`.
+      status = err instanceof UnsafeSymlinkError ? 'setup-error' : 'launch-error';
       log('workspace prep failed', { error: (err as Error).message });
       throw new LifecycleHandled();
     }
@@ -228,7 +231,14 @@ export async function runTrial(spec: TrialSpec, opts: RunTrialOptions): Promise<
       profile,
       router,
       qnaPolicy: spec.qna,
-      maxWallClockMs: opts.maxWallClockMs ?? spec.timeoutSec * 1000 + 10_000,
+      // C1 (§7 timeout path): the engine's own deadline must expire BEFORE the parent's
+      // timeout kill (run.ts) reaches it, or the graceful timeout path here (trajectory,
+      // transcript, diff, teardown, temp cleanup) never runs — the parent's SIGKILL is
+      // uncatchable and skips all of it. Budget = remaining trial time minus a margin, so
+      // collect/evaluate/teardown have time to finish before the parent's backstop fires.
+      maxWallClockMs:
+        opts.maxWallClockMs ??
+        Math.max(1_000, spec.timeoutSec * 1000 - (Date.now() - startedAt) - 15_000),
       ...(spec.maxTurns !== undefined ? { maxTurns: spec.maxTurns } : {}),
       ...(opts.pollIntervalMs !== undefined ? { pollIntervalMs: opts.pollIntervalMs } : {}),
       ...(opts.onQna ? { onQna: opts.onQna } : {}),

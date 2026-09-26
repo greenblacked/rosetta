@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, it, expect } from 'vitest';
@@ -10,13 +10,20 @@ import { DEFAULT_GATE } from '../../src/config/defaults';
 import { runSuite } from '../../src/orchestrator/run';
 import { loadRun } from '../../src/results/loader';
 import { ExitCode } from '../../src/cli/exit-codes';
-import { listTmpAgentDirs, mockProfile, sweepNewTmpAgentDirs, tmpRunDir } from './helpers';
+import { cleanupTmpRunDirs, listTmpAgentDirs, mockProfile, sweepNewTmpAgentDirs, tmpRunDir } from './helpers';
 
 // This suite intentionally produces retained (setup-error / timeout) trials whose
 // workspace + ctrl dir are kept per §7; sweep the ones it created so a full vitest run
 // shows no `curiocity-ws-*`/`curiocity-ctrl-*` growth (Part 3.3).
 const tmpBaseline = new Set(listTmpAgentDirs());
-afterAll(() => sweepNewTmpAgentDirs(tmpBaseline));
+// E5: also remove this file's own `curio-test-run-*` (via tmpRunDir) and
+// `curio-setup-*` (failingSetupScript) dirs.
+const createdSetupDirs: string[] = [];
+afterAll(() => {
+  sweepNewTmpAgentDirs(tmpBaseline);
+  cleanupTmpRunDirs();
+  for (const d of createdSetupDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 /**
  * Suite-level integration (§4/§13/§14): the bounded pool, fork+env-scrub, exit
@@ -69,6 +76,7 @@ function buildInputs(opts: {
 
 function failingSetupScript(): string {
   const dir = mkdtempSync(join(tmpdir(), 'curio-setup-'));
+  createdSetupDirs.push(dir);
   const path = join(dir, 'fail.sh');
   writeFileSync(path, '#!/bin/sh\necho "boom" >&2\nexit 3\n');
   chmodSync(path, 0o755);
@@ -123,7 +131,14 @@ describe('runSuite (orchestrator)', () => {
     expect(res.exitCode).toBe(ExitCode.OK);
   });
 
-  it('per-trial timeout → parent process-tree kill → status timeout → exit 3', async () => {
+  it('per-trial timeout → status timeout → exit 3, via the CHILD\'S OWN graceful timeout path (C1)', async () => {
+    // C1 regression: the child's engine deadline must expire BEFORE the parent's
+    // process-tree kill, so the graceful timeout path (trajectory/transcript/diff/
+    // teardown) runs and the parent's kill is only a backstop. Before the fix, the
+    // parent's SIGKILL always won this race (child deadline was timeoutSec+10s from
+    // launch, always later than the parent's timeoutSec-from-fork kill), so the trial
+    // was PARENT-synthesized with zero artifacts. Asserting the artifacts below (only
+    // the child itself writes them, on its own graceful path) proves which path ran.
     const inputs = buildInputs({
       profiles: { slow: mockProfile('timeout.json') },
       cases: [{ name: 'hangs', agents: ['slow'], timeoutSec: 1 }],
@@ -132,5 +147,11 @@ describe('runSuite (orchestrator)', () => {
     expect(res.trials).toHaveLength(1);
     expect(res.trials[0]!.status).toBe('timeout');
     expect(res.exitCode).toBe(ExitCode.PARTIAL_INFRA);
+
+    // Only the child's own graceful path (collect step) writes these — a parent-
+    // synthesized (SIGKILL'd) trial writes just a bare trial.json with no artifacts.
+    const tdir = join(res.runDir, 'trials', 'hangs', 'slow', '1');
+    expect(existsSync(join(tdir, 'trajectory.jsonl'))).toBe(true);
+    expect(existsSync(join(tdir, 'workspace.diff'))).toBe(true);
   });
 });

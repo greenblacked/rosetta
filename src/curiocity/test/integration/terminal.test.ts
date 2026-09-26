@@ -199,4 +199,71 @@ describe('TerminalSession', () => {
 
     s.kill();
   });
+
+  it('C8: write() never splits a UTF-16 surrogate pair at the 1024-char chunk boundary', async () => {
+    // `cat -u` echoes stdin verbatim over the PTY (unbuffered, so it doesn't wait for
+    // EOF). A string with exactly 1023 plain chars before an astral character (an emoji
+    // = one surrogate PAIR, i.e. two UTF-16 code units) puts that pair's high surrogate
+    // at index 1023 and low surrogate at 1024 — exactly the 1024-char WRITE_CHUNK
+    // boundary. Before the fix, slicing there put each surrogate half in its own chunk;
+    // each chunk is UTF-8 encoded independently, and a lone surrogate encodes as U+FFFD
+    // (the corruption fable evidence reproduced) instead of round-tripping the emoji.
+    const marker = 'ZZMARKERZZ';
+    const payload = 'a'.repeat(1023) + '\u{1F600}' + marker; // 😀 = surrogate pair
+    const s = new TerminalSession({
+      command: '/bin/sh',
+      args: ['-c', 'cat -u'],
+      cwd: process.cwd(),
+      env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin' },
+      submit: 'enter',
+    });
+    await s.write(payload);
+    await waitFor(() => s.snapshot().replace(/\n/g, '').includes(marker));
+    // The terminal line-wraps at its column width — join rows back into one line before
+    // checking content, since that wrapping (not surrogate corruption) is expected here.
+    const rendered = s.snapshot().replace(/\n/g, '');
+    expect(rendered).toContain('\u{1F600}' + marker);
+    expect(rendered).not.toContain('�');
+    s.kill();
+  });
+
+  it('C2: kill() signals the PTY PROCESS GROUP (not just the leader), reaping a SIGHUP-immune background child', async () => {
+    // node-pty's own `pty.kill()` sends a signal to the leader PID only. The PTY leader
+    // (forkpty) is its own process-group leader, so a background child it spawns shares
+    // that group but is NOT reached by a single-PID signal — it survives, orphaned, once
+    // the leader exits. `trap '' HUP` on the leader models a real agent CLI that ignores
+    // SIGHUP (the OLD single-PID signal); `kill()` must still reach the child because it
+    // signals the whole group with SIGTERM, not just the leader with SIGHUP.
+    const script = "trap '' HUP; sleep 30 & echo child_pid:$!; wait";
+    const s = new TerminalSession({
+      command: '/bin/sh',
+      args: ['-c', script],
+      cwd: process.cwd(),
+      env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin' },
+      submit: 'enter',
+    });
+
+    let childPid: number | null = null;
+    await waitFor(() => {
+      const m = s.snapshot().match(/child_pid:(\d+)/);
+      if (m) childPid = Number(m[1]);
+      return childPid !== null;
+    });
+    const pid = childPid as unknown as number;
+    expect(pid).not.toBeNull();
+    // Confirm the background `sleep` is really alive before kill (signal 0 = existence probe).
+    expect(() => process.kill(pid, 0)).not.toThrow();
+
+    s.kill();
+
+    // The group SIGTERM should reap it well within the 5s SIGKILL-escalation window.
+    await waitFor(() => {
+      try {
+        process.kill(pid, 0);
+        return false; // still alive
+      } catch {
+        return true; // ESRCH — gone
+      }
+    }, 8000);
+  });
 });

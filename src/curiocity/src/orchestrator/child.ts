@@ -11,6 +11,13 @@ import { writeTrial } from '../results/store';
  * the per-trial timeout with a process-TREE kill → status `timeout`. The child
  * writes its own trial artifacts on normal completion; the parent writes a minimal
  * `trial.json` for parent-synthesized outcomes (timeout / unexpected death).
+ *
+ * (C1) This timeout is a BACKSTOP, not the primary timeout path: the child's own
+ * engine deadline (lifecycle.ts `maxWallClockMs`) is set to expire well before this
+ * fires, so in normal operation the child exits on its own via its graceful timeout
+ * path (trajectory/transcript/diff/teardown/temp cleanup) and this timer is cleared
+ * first. If the child is still alive when this DOES fire, it is sent SIGTERM first
+ * (giving it a last chance to unwind) and only SIGKILL'd 10s later.
  */
 
 /**
@@ -43,6 +50,9 @@ export interface RunChildOptions {
   onLog?: (msg: string, fields?: Record<string, unknown>) => void;
   onQna?: (entry: QnaEntry) => void;
   onMirror?: (data: string) => void;
+  /** Test-only: fork this entry instead of the real Curion (`curion/main`), so a crash /
+   *  stderr-draining test does not need to run a real trial. Production callers omit it. */
+  entry?: { path: string; execArgv: string[] };
 }
 
 export interface ChildTrialResult {
@@ -65,20 +75,35 @@ function synthResult(spec: TrialSpec, status: TrialResult['status'], totalMs: nu
   });
 }
 
+/** (C10) Bounded ring tail kept from the child's stderr, surfaced via `onLog` on a
+ *  crash so a module-load failure or uncaught exception is diagnosable instead of a
+ *  bare `agent-crash` with no reason. */
+const STDERR_TAIL_BYTES = 8 * 1024;
+
 export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> {
   const { spec, childEnv, timeoutMs } = opts;
+  const entryPath = opts.entry?.path ?? CURION_MAIN;
+  const entryExecArgv = opts.entry?.execArgv ?? EXEC_ARGV;
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = fork(CURION_MAIN, [], {
+    const child = fork(entryPath, [], {
       env: childEnv,
-      execArgv: EXEC_ARGV,
+      execArgv: entryExecArgv,
       detached: true, // own process group → whole tree (curion + PTY) killable
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      // (C10) stdout is ignored (pino's own child-side log write is not this parent's
+      // concern); stderr IS drained (never left un-piped) so it can never fill and
+      // block the child, and its tail is captured for crash diagnostics below.
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     });
 
     let settled = false;
     let resultMsg: TrialResult | null = null;
     let fatal: string | null = null;
+    let stderrTail = '';
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrTail = (stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_BYTES);
+    });
 
     const killTree = (signal: NodeJS.Signals): void => {
       try {
@@ -97,11 +122,19 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve(res);
     };
 
+    // (C1/C2) The child's own engine deadline (lifecycle.ts) is set to expire well
+    // before this fires, so in normal operation the child exits on its own and this
+    // timer is cleared first. This is a BACKSTOP: SIGTERM first (letting a still-alive
+    // child unwind through its own timeout/teardown path), SIGKILL only if it ignores
+    // that for 10s.
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
-      killTree('SIGKILL');
+      killTree('SIGTERM');
+      killTimer = setTimeout(() => killTree('SIGKILL'), 10_000);
       finish({ result: synthResult(spec, 'timeout', Date.now() - started), wroteArtifacts: false });
     }, timeoutMs);
 
@@ -144,6 +177,11 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
       }
       // No result: fatal (harness error → launch-error) or the child died (crash).
       const status = fatal ? 'launch-error' : 'agent-crash';
+      // (C10) Surface the captured stderr tail so an otherwise-bare agent-crash /
+      // launch-error carries the child's own diagnostics (e.g. a module-load stack).
+      if (stderrTail.trim() !== '') {
+        opts.onLog?.(`child-stderr tail (${status})`, { tag: 'child-stderr', tail: stderrTail });
+      }
       finish({ result: synthResult(spec, status, Date.now() - started), wroteArtifacts: false });
     });
 
