@@ -65,15 +65,19 @@ export async function cmdNext(
     // With target_id: use that specific phase (already validated above); its own depends_on is
     // still enforced per-step below, so a targeted phase whose deps are unmet yields no open steps.
     // Without target_id: find the active phase — the first phase (in array order) that is not
-    // yet fully complete AND whose own phase-level depends_on are satisfied (FR-PLAN-0004 AC:
-    // phase-2 depends_on phase-1, phase-1 not complete -> no phase-2 steps in `next`).
+    // yet fully complete (FR-PLAN-0011 "the active phase is the earliest phase that is not yet
+    // fully complete"). R9 — the active phase is chosen by array order alone: it must NOT skip
+    // ahead to a later phase merely because an earlier incomplete phase's own depends_on are
+    // unmet. Skipping would break sequential enforcement (a later phase's steps could appear in
+    // `next` before an earlier phase finishes) and would hide the earlier phase's in_progress
+    // steps (interrupted work the caller must still see). The earlier phase's unmet-phase-dep
+    // open steps are instead surfaced via the `blocked` group below, so the caller sees why no
+    // work is ready there.
     let phasesToScan: Phase[];
     if (targetId) {
       phasesToScan = plan.phases.filter((p) => p.id === targetId);
     } else {
-      const activePhase = plan.phases.find(
-        (p) => (p.status ?? "open") !== "complete" && depsSatisfied(p, phaseStatusMap),
-      );
+      const activePhase = plan.phases.find((p) => (p.status ?? "open") !== "complete");
       phasesToScan = activePhase ? [activePhase] : [];
     }
 
@@ -90,8 +94,19 @@ export async function cmdNext(
           inProgress.push(buildNextStep(step, phase));
         } else if (st === "open") {
           // A6 — ready requires both the step's own deps AND its phase's deps to be satisfied.
-          if (depsSatisfied(step, stepStatusMap) && depsSatisfied(phase, phaseStatusMap)) {
+          const stepDepsOk = depsSatisfied(step, stepStatusMap);
+          const phaseDepsOk = depsSatisfied(phase, phaseStatusMap);
+          if (stepDepsOk && phaseDepsOk) {
             openReady.push(buildNextStep(step, phase));
+          } else if (!targetId && !phaseDepsOk) {
+            // R9 — this is the active phase (chosen by array order alone, see above) and it is
+            // not yet eligible to run because its own phase-level depends_on are unmet. Its open
+            // steps would otherwise silently vanish from every `next` call (no later phase is
+            // ever scanned while this one remains active), so surface them as `blocked` instead
+            // so the caller understands why. Kept out of the target_id path deliberately: a
+            // targeted phase's own unmet depends_on already yields no steps at all (A6), and
+            // target_id behaviour must not change here.
+            blocked.push(buildNextStep(step, phase));
           }
         } else if (st === "blocked") {
           blocked.push(buildNextStep(step, phase));

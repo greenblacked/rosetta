@@ -299,12 +299,21 @@ export async function atomicWriteWithBackup<Doc extends { previous_version?: str
   filePath: string,
   mutate: (doc: Doc) => { ok: true; result: T; updated: Doc } | { ok: false; error: string; include_help?: boolean },
   saveDoc: (filePath: string, doc: Doc) => void,
-  options?: { maxRetries?: number; retention?: number; errors?: DocIoErrors },
+  options?: { maxRetries?: number; retention?: number; errors?: DocIoErrors; mutatorIgnoresCurrent?: boolean },
 ): Promise<RunEnvelope<{ result: T; backupPath: string | null }>> {
   const maxRetries = options?.maxRetries ?? PLAN_BACKUP_MAX_RETRIES;
   const retention = options?.retention ?? PLAN_BACKUP_RETENTION;
   const corruptedError = options?.errors?.corrupted ?? "plan_file_corrupted";
   const notFoundError = options?.errors?.notFound ?? "plan_not_found";
+  // R4 — `mutatorIgnoresCurrent` is for callers whose `mutate()` rebuilds the document from
+  // scratch and never reads `current` at all (e.g. `plan create` re-running against an existing
+  // path). For those callers a corrupted or missing current document is not fatal: skip parsing
+  // it and still run the rename-as-guard cycle below, which backs up whatever raw bytes are on
+  // disk (corrupted or not — see step 5) and writes the freshly-built document, so `create` never
+  // gets permanently stuck behind a truncated plan.json. A non-JSON-parse read failure (e.g.
+  // EISDIR from a directory at `filePath`) still returns `corruptedError` unconditionally: that
+  // is not a recoverable "corrupted document", it is a fundamentally unwritable path.
+  const mutatorIgnoresCurrent = options?.mutatorIgnoresCurrent ?? false;
 
   // FR-PLAN-0024 write cycle. The FR statement names rename-as-guard, but neither plain
   // renameSync (POSIX rename overwrites the target — clobbers another writer's bak) nor
@@ -328,11 +337,24 @@ export async function atomicWriteWithBackup<Doc extends { previous_version?: str
       try {
         current = await readDocWithRetry<Doc>(filePath);
       } catch (e) {
-        // parse failure — treat as corrupted, bubble immediately
-        return err(corruptedError);
+        // R4 — a JSON.parse SyntaxError is a recoverable "corrupted document" for a mutator that
+        // ignores `current`; any other read failure (e.g. EISDIR) is not, and still bubbles as
+        // corruptedError immediately regardless of the flag.
+        if (mutatorIgnoresCurrent && e instanceof SyntaxError) {
+          current = null;
+        } else {
+          return err(corruptedError);
+        }
       }
 
-      if (!current) return err(notFoundError);
+      if (!current) {
+        if (!mutatorIgnoresCurrent) return err(notFoundError);
+        // R4 — mutate() below does not read `current` at all (it rebuilds the document from the
+        // caller's own inputs), so a missing/corrupted current document is not fatal here. The
+        // placeholder is never inspected; the raw bytes actually on disk (if any) still get
+        // backed up by the unconditional rename in step 5.
+        current = {} as Doc;
+      }
 
       // Step 2: Apply mutation in memory
       const fnResult = mutate(current);
