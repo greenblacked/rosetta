@@ -269,6 +269,21 @@ describe('§6 interaction engine — trigger table, row by row', () => {
     expect(result.status).toBe('launch-error');
   });
 
+  it('R7: timeoutSec=10 leaves ~the full budget for the engine (regression: old formula left ~1s)', async () => {
+    // Old budget: max(1000, timeoutSec*1000 - elapsed - 15_000). For timeoutSec=10 that's
+    // max(1000, 10000 - ~0 - 15000) = max(1000, -5000) = 1000ms — a 3s scene would always
+    // time out regardless of timeoutSec. Fixed budget: max(1000, timeoutSec*1000 -
+    // elapsed) ≈ 9900ms, comfortably covering the scene's 3s sleep.
+    const { result } = await run({
+      scene: 'budget-sleep.json',
+      timeoutSec: 10,
+      // A large freeze window so the 3s silent sleep doesn't trip the (unrelated) freeze
+      // watchdog fail-safe — this test is only about the engine's own wall-clock budget.
+      profileOverrides: { freezeMs: 8000 },
+    });
+    expect(result.status).toBe('passed');
+  }, 15_000);
+
   it('launch-error (R1 preflight): unresolvable agent command → launch-error, not agent-crash', async () => {
     // node-pty would spawn a PTY that exits nonzero for a missing binary, which the
     // engine reads as `agent-crash`. The launch preflight resolves the command first,
