@@ -2,10 +2,10 @@
 // for the specs command). Mirrors the shape of commands/plan/core.ts.
 
 import * as fs from "fs";
-import * as path from "path";
 import type { CommandInput } from "../../registry/types.js";
 import { detectCycle } from "../../shared/graph.js";
 import { nowUtcZ } from "../../shared/time.js";
+import { writeDocAtomic } from "../../shared/doc-io.js";
 import {
   SPECS_MAX_SPECS,
   SPECS_MAX_DEPENDENCIES_PER_SPEC,
@@ -523,10 +523,10 @@ export function loadSpecs(file: string): SpecsDocument | null {
 }
 
 export function saveSpecs(file: string, doc: SpecsDocument): void {
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true });
   doc.updated_at = nowUtcZ();
-  fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+  // A3/FR-SPECS-0070/0071 — write via tmp-file + rename (mirrors plan's savePlan) so a
+  // concurrent reader never observes a partially-written or truncated specs document.
+  writeDocAtomic(file, JSON.stringify(doc, null, 2));
 }
 
 /**

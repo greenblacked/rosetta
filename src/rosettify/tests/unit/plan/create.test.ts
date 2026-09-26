@@ -250,10 +250,25 @@ describe("cmdCreate — FR-PLAN-0010 / FR-PLAN-0040", () => {
     expect(plan.phases[0]!.steps).toEqual([]);
   });
 
-  it("internal_error: returns internal_error for non-Error thrown", async () => {
+  // A2/FR-PLAN-0024 — `plan create` on an existing path now routes through the same
+  // atomicWriteWithBackup cycle as `upsert` (so a plan is never silently overwritten without a
+  // backup). A directory used as the plan path is not ENOENT, so readDocWithRetry's read
+  // failure is treated as a genuine corrupted-document read (EISDIR), not a raw internal_error —
+  // this used to throw synchronously from a direct fs.writeFileSync instead.
+  it("plan_file_corrupted: directory-as-plan-path routes through the backup cycle's read, not a raw throw", async () => {
     const dirPath = path.join(tmpDir, "dir-not-file");
     fs.mkdirSync(dirPath, { recursive: true });
     const result = await cmdCreate(dirPath, { name: "Fail" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("plan_file_corrupted");
+  });
+
+  it("internal_error: returns internal_error for non-Error thrown (first-create path)", async () => {
+    const file = planFile("bigint.json");
+    // A value JSON.stringify cannot serialize makes savePlan's direct first-create write throw,
+    // which cmdCreate's outer catch turns into an internal_error.
+    const data = { name: "Fail", phases: [{ id: "p1", name: "P1", weird: 10n }] };
+    const result = await cmdCreate(file, data as unknown as Record<string, unknown>);
     expect(result.ok).toBe(false);
     expect(result.error).toContain("internal_error");
   });

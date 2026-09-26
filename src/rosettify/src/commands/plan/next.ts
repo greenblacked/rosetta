@@ -15,6 +15,7 @@ import {
   type Step,
   type Status,
   buildStepStatusMap,
+  buildPhaseStatusMap,
   depsSatisfied,
 } from "./core.js";
 
@@ -56,17 +57,22 @@ export async function cmdNext(
     }
 
     const stepStatusMap = buildStepStatusMap(plan);
+    // A6/FR-PLAN-0004/FR-PLAN-0011 — a step's own depends_on is not the whole story: its parent
+    // phase's depends_on must also be satisfied before the step is "ready".
+    const phaseStatusMap = buildPhaseStatusMap(plan);
 
     // Determine which phase(s) to source work from.
-    // With target_id: use that specific phase (already validated above).
-    // Without target_id: find the active phase — the first phase (in array
-    // order) that is not yet fully complete (sequential enforcement).
+    // With target_id: use that specific phase (already validated above); its own depends_on is
+    // still enforced per-step below, so a targeted phase whose deps are unmet yields no open steps.
+    // Without target_id: find the active phase — the first phase (in array order) that is not
+    // yet fully complete AND whose own phase-level depends_on are satisfied (FR-PLAN-0004 AC:
+    // phase-2 depends_on phase-1, phase-1 not complete -> no phase-2 steps in `next`).
     let phasesToScan: Phase[];
     if (targetId) {
       phasesToScan = plan.phases.filter((p) => p.id === targetId);
     } else {
       const activePhase = plan.phases.find(
-        (p) => (p.status ?? "open") !== "complete",
+        (p) => (p.status ?? "open") !== "complete" && depsSatisfied(p, phaseStatusMap),
       );
       phasesToScan = activePhase ? [activePhase] : [];
     }
@@ -83,7 +89,8 @@ export async function cmdNext(
         if (st === "in_progress") {
           inProgress.push(buildNextStep(step, phase));
         } else if (st === "open") {
-          if (depsSatisfied(step, stepStatusMap)) {
+          // A6 — ready requires both the step's own deps AND its phase's deps to be satisfied.
+          if (depsSatisfied(step, stepStatusMap) && depsSatisfied(phase, phaseStatusMap)) {
             openReady.push(buildNextStep(step, phase));
           }
         } else if (st === "blocked") {
