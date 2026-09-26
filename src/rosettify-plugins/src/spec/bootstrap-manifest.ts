@@ -44,20 +44,32 @@ export const CODEX_PLUGIN_ROOT_COMMAND =
 
 // Copilot needs additionalContext at BOTH top-level (Copilot CLI) AND nested in
 // hookSpecificOutput (VS Code) — see docs/hooks/copilot.md, Bug 2.
-export const COPILOT_PLUGIN_ROOT_BASH =
-  `for base in "$HOME/.vscode/agent-plugins" "$HOME/.local/share/Code/agentPlugins"; ` +
-  `do root="$base/github.com/griddynamics/rosetta/plugins/core-copilot"; ` +
-  `if [ -f "$root/commands/coding-flow.md" ]; then ` +
-  `printf '%s' "{\\"additionalContext\\":\\"Rosetta Plugin Path: $root\\",\\"hookSpecificOutput\\":{\\"hookEventName\\":\\"SessionStart\\",\\"additionalContext\\":\\"Rosetta Plugin Path: $root\\"}}"; ` +
-  `break; ` +
-  `fi; ` +
-  `done`;
+//
+// D4: the probed plugin folder is `spec.destination` (e.g. `core-copilot` or, under a profile,
+// `core-copilot-light`) — NOT a hardcoded `core-copilot`. A build profile only changes
+// `destination`, so a hardcoded folder name means a profile's Copilot plugin (e.g. the lightweight
+// build) can never find its own install root: with only the light plugin installed the probe finds
+// nothing, and with both installed it silently reports the STANDARD plugin's root instead.
+export function copilotPluginRootBash(destination: string): string {
+  return (
+    `for base in "$HOME/.vscode/agent-plugins" "$HOME/.local/share/Code/agentPlugins"; ` +
+    `do root="$base/github.com/griddynamics/rosetta/plugins/${destination}"; ` +
+    `if [ -f "$root/commands/coding-flow.md" ]; then ` +
+    `printf '%s' "{\\"additionalContext\\":\\"Rosetta Plugin Path: $root\\",\\"hookSpecificOutput\\":{\\"hookEventName\\":\\"SessionStart\\",\\"additionalContext\\":\\"Rosetta Plugin Path: $root\\"}}"; ` +
+    `break; ` +
+    `fi; ` +
+    `done`
+  );
+}
 
-export const COPILOT_PLUGIN_ROOT_POWERSHELL =
-  `$root = "$env:LOCALAPPDATA\\Code\\agentPlugins\\github.com\\griddynamics\\rosetta\\plugins\\core-copilot"; ` +
-  `if (Test-Path "$root\\commands\\coding-flow.md") { ` +
-  `Write-Output ('{"additionalContext":"Rosetta Plugin Path: ' + $root + '","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Rosetta Plugin Path: ' + $root + '"}}') ` +
-  `}`;
+export function copilotPluginRootPowershell(destination: string): string {
+  return (
+    `$root = "$env:LOCALAPPDATA\\Code\\agentPlugins\\github.com\\griddynamics\\rosetta\\plugins\\${destination}"; ` +
+    `if (Test-Path "$root\\commands\\coding-flow.md") { ` +
+    `Write-Output ('{"additionalContext":"Rosetta Plugin Path: ' + $root + '","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Rosetta Plugin Path: ' + $root + '"}}') ` +
+    `}`
+  );
+}
 
 /**
  * The cursor plugin-root entry command.

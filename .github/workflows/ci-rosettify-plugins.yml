@@ -8,6 +8,8 @@ on:
   pull_request:
     paths:
       - 'src/rosettify-plugins/**'
+      - 'instructions/r3/**'
+      - 'plugins/**'
   workflow_dispatch:
 
 concurrency:

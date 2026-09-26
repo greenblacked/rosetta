@@ -60,15 +60,14 @@ describe('hooks-registered — bundled src hooks appear in every plugin hooks.js
         // Skip claude-code-only hooks for non-claude plugins
         if (CLAUDE_CODE_ONLY_HOOKS.has(hookName) && plugin !== 'core-claude') continue;
 
-        test(`${hookName}.js is referenced`, () => {
-          if (!shipsHooks(manifestPath)) return; // advisory hooks ship from the hooks release onward
-          if (!rawJson) return;                  // file-missing case handled above
-          // Presence-based: only a hook whose bundle is actually generated into the plugin
-          // folder must be registered. A not-yet-released hook (no bundle) is skipped, which
-          // supports the one-by-one rollout and ignores shared libs (e.g. read-once-shared)
-          // that are never bundled.
-          const bundlePath = path.join(path.dirname(jsonPath), `${hookName}.js`);
-          if (!existsSync(bundlePath)) return;
+        // E1: this guard is release-gated (advisory hooks ship one-by-one) and presence-based
+        // (a hook is checked only once its bundle is actually generated into the plugin
+        // folder). The committed tree ships with deterministicHooks:false, so NO bundle is
+        // generated and every one of these was a silent `return` — 32 tests reporting green
+        // while asserting nothing. `test.skipIf` makes that gap visible as SKIPPED instead.
+        const bundlePath = path.join(path.dirname(jsonPath), `${hookName}.js`);
+        const skip = !shipsHooks(manifestPath) || !rawJson || !existsSync(bundlePath);
+        test.skipIf(skip)(`${hookName}.js is referenced`, () => {
           expect(rawJson).toContain(`${hookName}.js`);
         });
       }

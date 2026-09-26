@@ -259,8 +259,10 @@ describe('Antigravity E2E — real instructions/r3/core', () => {
       expect(data.rosetta.PreToolUse).toBeUndefined();
       expect(raw).not.toContain('bootstrap');
 
+      // A hook bundle is only ever synced under a hooks directory; a `.js` elsewhere (e.g. a
+      // skill's own scripts/*.js asset, #330's harness skill) is source content, not a bundle.
       const files = listFilesRecursive(ag());
-      expect(files.some((f) => f.endsWith('.js'))).toBe(false);
+      expect(files.some((f) => f.endsWith('.js') && !f.includes('skills/'))).toBe(false);
     });
 
     it('deterministic-hooks true: PreToolUse dangerous-actions matcher is exactly "run_command|mcp__.*" (bash+MCP only, no file-write tools); no bootstrap payload', () => {

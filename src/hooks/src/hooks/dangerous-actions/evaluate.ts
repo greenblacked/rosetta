@@ -28,6 +28,15 @@ const MARKER_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
 
 const MCP_MARKER_FIELDS = ['command', 'sql', 'query', 'new_string', 'content'] as const;
 
+/** A9: for a tool field that holds an array of edit objects (MultiEdit's `edits`), only these
+ *  sub-fields are user-visible write-time content — `old_string` is EXISTING file text the
+ *  operation targets, not content the caller asserts, so it must not carry the marker any more
+ *  than Edit's `old_string` does. A tool with no entry here keeps the prior full-object scan
+ *  (MCP tools' array fields have no established shape to allowlist). */
+const MARKER_ARRAY_ITEM_SUBFIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
+  MultiEdit: ['new_string'],
+};
+
 const MCP_SHELL_FIELDS   = ['command', 'cmd', 'shell_command'] as const;
 const MCP_PATH_FIELDS    = ['path', 'file_path', 'filePath', 'target', 'target_path'] as const;
 const MCP_CONTENT_FIELDS = ['content', 'new_string', 'query', 'sql'] as const;
@@ -86,7 +95,9 @@ function matchPatterns(
 }
 
 function matchDangerousPath(filePath: string): DangerPattern | null {
-  const normalizedPath = filePath.replace(/\/+$/, '');
+  // A8: normalize Windows backslashes before the `/`-only trailing-slash strip and split, so
+  // `C:\Users\me\.aws\credentials` matches the same as its POSIX form.
+  const normalizedPath = filePath.replace(/\\/g, '/').replace(/\/+$/, '');
   const basename = normalizedPath.split('/').pop() ?? normalizedPath;
   for (const p of DANGEROUS_PATHS) {
     if (p.re.test(normalizedPath)) return p;
@@ -109,6 +120,7 @@ export function hasAIReviewedMarker(
   const fields = toolName.startsWith('mcp__')
     ? MCP_MARKER_FIELDS
     : (MARKER_FIELDS_BY_TOOL[toolName] ?? MCP_MARKER_FIELDS);
+  const arrayItemSubfields = MARKER_ARRAY_ITEM_SUBFIELDS_BY_TOOL[toolName];
 
   return fields.some(f => {
     const v = input[f];
@@ -117,8 +129,14 @@ export function hasAIReviewedMarker(
       return v.some(item => {
         if (typeof item === 'string') return MARKER_RE.test(item);
         if (item && typeof item === 'object') {
-          return Object.values(item as Record<string, unknown>)
-            .some(inner => typeof inner === 'string' && MARKER_RE.test(inner));
+          const record = item as Record<string, unknown>;
+          // A9: MultiEdit (and any tool with an allowlist here) scans ONLY its allowed
+          // sub-fields — e.g. `new_string`, never `old_string` (existing file text the edit
+          // targets, not asserted content) — matching Edit's field-level restriction above.
+          const values = arrayItemSubfields
+            ? arrayItemSubfields.map(sf => record[sf])
+            : Object.values(record);
+          return values.some(inner => typeof inner === 'string' && MARKER_RE.test(inner));
         }
         return false;
       });

@@ -14,7 +14,7 @@ import {
 import { buildCopilotHookPayloadJson } from '../escaping/json-string.js';
 import { wrapInPrintf } from '../escaping/shell.js';
 import { wrapInPsWriteOutput } from '../escaping/powershell.js';
-import { COPILOT_PLUGIN_ROOT_BASH, COPILOT_PLUGIN_ROOT_POWERSHELL } from '../spec/bootstrap-manifest.js';
+import { copilotPluginRootBash, copilotPluginRootPowershell } from '../spec/bootstrap-manifest.js';
 import type { PluginProcessingFrame } from '../types.js';
 
 /**
@@ -36,8 +36,11 @@ export function pluginAssembleCopilotBootstrap(
       return buildCopilotBootstrapEntry(bash, powershell);
     },
     (folderPairs) => {
-      const bash = applyFolderRewrites(COPILOT_PLUGIN_ROOT_BASH, folderPairs);
-      const powershell = applyFolderRewrites(COPILOT_PLUGIN_ROOT_POWERSHELL, folderPairs);
+      // D4: probe the plugin's OWN destination folder (e.g. `core-copilot-light` under a
+      // profile), not a hardcoded `core-copilot`.
+      const bash = applyFolderRewrites(copilotPluginRootBash(p.spec.destination), folderPairs);
+      const powershell = applyFolderRewrites(
+        copilotPluginRootPowershell(p.spec.destination), folderPairs);
       return buildCopilotBootstrapEntry(bash, powershell);
     },
   );

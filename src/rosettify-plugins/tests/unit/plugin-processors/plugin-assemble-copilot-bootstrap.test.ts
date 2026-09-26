@@ -21,6 +21,7 @@ function makePluginFrame(
   return {
     spec: {
       name: 'core-copilot',
+      destination: 'core-copilot',
       includeBootstrapRules: true,
       includeIndexEntries: extra?.includeIndexEntries ?? false,
       bootstrapManifest: [...BOOTSTRAP_MANIFEST_ORDER],
@@ -283,5 +284,29 @@ describe('pluginAssembleCopilotBootstrap — NFR-0004 soft error', () => {
     const result = pluginAssembleCopilotBootstrap(p);
     const softErrors = result.errors.filter((e) => e.kind === 'soft');
     expect(softErrors.length).toBe(0);
+  });
+});
+
+// ─── D4: plugin-root probe uses spec.destination, not a hardcoded folder name ─────────────────
+// A build profile (e.g. lightweight) only changes `spec.destination` (e.g. `core-copilot-light`).
+// A probe hardcoded to `core-copilot` can never find that plugin's own install root.
+describe('pluginAssembleCopilotBootstrap — plugin-root probe path (D4)', () => {
+  it('probes the standard destination folder for a standard build', () => {
+    const frames = [makeDocFrame('plugin-files-mode', '\n# Body\n')];
+    const p = makePluginFrame(frames);
+    const result = pluginAssembleCopilotBootstrap(p);
+    const payload = result.templateContext['bootstrap_hooks'] as string;
+    expect(payload).toMatch(/rosetta\/plugins\/core-copilot(?!-light)/);
+    expect(payload).not.toMatch(/rosetta\/plugins\/core-copilot-light/);
+  });
+
+  it('probes the LIGHT destination folder, not core-copilot, for a lightweight build', () => {
+    const frames = [makeDocFrame('plugin-files-mode', '\n# Body\n')];
+    const p = makePluginFrame(frames);
+    (p.spec as unknown as { destination: string }).destination = 'core-copilot-light';
+    const result = pluginAssembleCopilotBootstrap(p);
+    const payload = result.templateContext['bootstrap_hooks'] as string;
+    expect(payload).toMatch(/rosetta\/plugins\/core-copilot-light/);
+    expect(payload).not.toMatch(/rosetta\/plugins\/core-copilot(?!-light)/);
   });
 });

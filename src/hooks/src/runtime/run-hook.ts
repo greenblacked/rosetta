@@ -126,7 +126,11 @@ const makeDedupKey = (
 };
 
 const evalFilePath = (fp: FilePathPredicate, filePath: string): boolean => {
-  const p  = filePath;
+  // A8: normalize Windows backslashes once, up front. Every exclusion/predicate below (extOneOf,
+  // notContainsAny, notTokenSegmentAny, notStartsWithAny, ...) matches against `p`/`pl`, and all of
+  // them assume `/` separators; on a raw `C:\repo\docs\guide.md` payload they silently never match,
+  // so exclusions for docs/, tmp/, tests/, node_modules/, dist/ are bypassed on Windows.
+  const p  = filePath.replace(/\\/g, '/');
   const pl = p.toLowerCase();
   const rel = toRelative(p);
   debugLogBranch('run-hook', 'eval-file-path-start', {

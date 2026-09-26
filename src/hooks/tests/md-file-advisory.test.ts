@@ -84,6 +84,13 @@ describe('main() — Claude Code format (integration)', () => {
     expect(await execute(payload)).toBe('');
   });
 
+  // A8: Windows delivers native backslash paths. Without normalization the docs/ exclusion never
+  // matches a `C:\...\docs\...` path, so a Windows Claude Code user got a false advisory here.
+  test('silent for docs/ path with Windows backslashes (A8)', async () => {
+    const payload = { ...ccWrite, tool_input: { file_path: 'C:\\repo\\docs\\guide.md' } };
+    expect(await execute(payload)).toBe('');
+  });
+
   test('silent for agents/ path', async () => {
     const payload = { ...ccWrite, tool_input: { file_path: 'agents/MEMORY.md' } };
     expect(await execute(payload)).toBe('');

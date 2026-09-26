@@ -1,6 +1,7 @@
 // src/hooks/tests/lint-format-advisory.test.ts
 import { test, describe, expect } from 'vitest';
 import { Readable, Writable } from 'stream';
+import crypto from 'crypto';
 
 import ccWrite from './fixtures/claude-code-post-tool-use-write.json';
 import ccEdit from './fixtures/claude-code-post-tool-use-edit.json';
@@ -17,9 +18,30 @@ import { assertCodexOutput } from '../src/adapters/codex-output';
 // runner. runHook writes report.stderrMessage to this stream (defaults to process.stderr).
 const nullStderr = new Writable({ write(_chunk, _enc, cb) { cb(); } });
 
-async function execute(payload: unknown): Promise<string> {
+// E2: the throttle (src/runtime/throttle.ts) is a real file lock under os.tmpdir() keyed by
+// session_id+file, TTL 5s. Most tests below reuse a fixture's fixed session_id (e.g.
+// "sanitized-session-id"), so a rerun within 5s of a previous run (watch mode, "rerun failed",
+// a second CI job on the same runner) hits a still-live lock from the prior run and the
+// advisory is spuriously throttled away. `execute()` therefore randomizes session_id by
+// default; tests that deliberately exercise throttling pass `randomizeSession: false` and keep
+// full control of the session id (own uniqueness via Date.now()/null, as before).
+async function execute(
+  payload: Record<string, unknown>,
+  opts: { randomizeSession?: boolean } = {},
+): Promise<string> {
+  const { randomizeSession = true } = opts;
+  // Cursor's adapter derives the dedup session id from `conversation_id`, not `session_id`
+  // (src/adapters/cursor.ts) — both must be randomized, or a Cursor-shaped payload keeps
+  // colliding on the fixture's fixed `conv-abc123` regardless of `session_id`.
+  const finalPayload = randomizeSession
+    ? {
+        ...payload,
+        session_id: crypto.randomUUID(),
+        ...('conversation_id' in payload ? { conversation_id: crypto.randomUUID() } : {}),
+      }
+    : payload;
   let output = '';
-  const stdin = Readable.from([JSON.stringify(payload)]);
+  const stdin = Readable.from([JSON.stringify(finalPayload)]);
   const stdout = new Writable({ write(chunk, _, cb) { output += String(chunk); cb(); } });
   await runHook(lintFormatAdvisoryHook, { stdin, stdout, stderr: nullStderr });
   return output;
@@ -111,8 +133,8 @@ describe('throttle dedupe', () => {
       session_id: 'throttle-A-' + Date.now(),
       tool_input: { file_path: 'throttle-a.ts' },
     };
-    const first = await execute(payload);
-    const second = await execute(payload);
+    const first = await execute(payload, { randomizeSession: false });
+    const second = await execute(payload, { randomizeSession: false });
     expect(first).not.toBe('');   // first fire: advisory
     expect(second).toBe('');      // immediate re-fire: throttled
   });
@@ -121,15 +143,15 @@ describe('throttle dedupe', () => {
     const sessionId = 'throttle-B-' + Date.now();
     const payloadA = { ...ccWrite, session_id: sessionId, tool_input: { file_path: 'b-file-a.ts' } };
     const payloadB = { ...ccWrite, session_id: sessionId, tool_input: { file_path: 'b-file-b.ts' } };
-    expect(await execute(payloadA)).not.toBe('');
-    expect(await execute(payloadB)).not.toBe('');
+    expect(await execute(payloadA, { randomizeSession: false })).not.toBe('');
+    expect(await execute(payloadB, { randomizeSession: false })).not.toBe('');
   });
 
   test('fires for same file in a different session', async () => {
     const payloadA = { ...ccWrite, session_id: 'throttle-C1-' + Date.now(), tool_input: { file_path: 'shared-c.ts' } };
     const payloadB = { ...ccWrite, session_id: 'throttle-C2-' + Date.now(), tool_input: { file_path: 'shared-c.ts' } };
-    expect(await execute(payloadA)).not.toBe('');
-    expect(await execute(payloadB)).not.toBe('');
+    expect(await execute(payloadA, { randomizeSession: false })).not.toBe('');
+    expect(await execute(payloadB, { randomizeSession: false })).not.toBe('');
   });
 });
 
@@ -309,8 +331,8 @@ describe('throttle without session_id', () => {
   test('silent on immediate re-fire for same file', async () => {
     const filePath = `no-session-${Date.now()}.ts`;
     const payload = { ...ccWrite, session_id: null, tool_input: { file_path: filePath } };
-    const first = await execute(payload);
-    const second = await execute(payload);
+    const first = await execute(payload, { randomizeSession: false });
+    const second = await execute(payload, { randomizeSession: false });
     expect(first).not.toBe('');
     expect(second).toBe('');
   });

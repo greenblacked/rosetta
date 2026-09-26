@@ -17,7 +17,7 @@
     {
       "name": "rosetta-light",
       "source": "plugins/core-cursor-light",
-      "description": "Rosetta for Cursor - Software Engineering Accelerator instruction set, workflows, and guardrails. (lightweight profile: simpler workflows, smaller models)"
+      "description": "Rosetta for Cursor - Software Engineering Accelerator instruction set, workflows, and guardrails. (lightweight: simpler workflows, smaller models)"
     }
   ]
 }

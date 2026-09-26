@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - 'src/hooks/**'
+      - 'plugins/**'
   workflow_dispatch:
 
 concurrency:
