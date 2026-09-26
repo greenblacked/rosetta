@@ -38,6 +38,13 @@ const IGNORE_SIGTERM_ENTRY = fileURLToPath(
   new URL('../fixtures/ignore-sigterm-curion/ignore-sigterm.mjs', import.meta.url),
 );
 
+const LEADER_EXITS_CHILD_SURVIVES_ENTRY = fileURLToPath(
+  new URL(
+    '../fixtures/leader-exits-child-survives-curion/leader-exits-child-survives.mjs',
+    import.meta.url,
+  ),
+);
+
 function minimalSpec(): TrialSpec {
   return trialSpecSchema.parse({
     agentId: 'mock',
@@ -121,6 +128,73 @@ describe('R1: the SIGKILL escalation survives finish() resolving the trial as `t
           return false; // still alive
         } catch {
           return true; // ESRCH — reaped by SIGKILL
+        }
+      }, 15_000);
+    } finally {
+      rmSync(pidDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+/**
+ * F7: `killTree('SIGTERM')` signals the whole detached process GROUP, but
+ * `clearKillTimer()` used to fire on the curion (group LEADER)'s own 'exit' event. A
+ * curion that reacts to SIGTERM and exits promptly — while a same-group subprocess it
+ * spawned (e.g. teardown/setup) traps SIGTERM and survives — cancelled the SIGKILL
+ * escalation the instant the leader exited, orphaning that subprocess forever. The fix:
+ * the escalation must keep polling the GROUP (not just the leader) and only stop once
+ * everything in it is gone, sending SIGKILL to the group at the deadline if anything
+ * remains.
+ */
+describe('F7: the SIGKILL escalation outlives the leader when a same-group child ignores SIGTERM', () => {
+  it('still SIGKILLs the surviving same-group child ~10s after the leader itself has exited', async () => {
+    const pidDir = mkdtempSync(join(tmpdir(), 'curiocity-f7-'));
+    const pidFile = join(pidDir, 'pid');
+    const childPidFile = join(pidDir, 'child-pid');
+    try {
+      const { result } = await runChildTrial({
+        spec: minimalSpec(),
+        childEnv: {
+          PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+          CURIOCITY_TEST_PID_FILE: pidFile,
+          CURIOCITY_TEST_CHILD_PID_FILE: childPidFile,
+        },
+        // Short backstop so the test doesn't wait on the spec's own timeoutSec.
+        timeoutMs: 200,
+        entry: { path: LEADER_EXITS_CHILD_SURVIVES_ENTRY, execArgv: [] },
+      });
+
+      expect(result.status).toBe('timeout');
+
+      await waitFor(() => existsSync(pidFile) && existsSync(childPidFile));
+      const leaderPid = Number(readFileSync(pidFile, 'utf8').trim());
+      const childPid = Number(readFileSync(childPidFile, 'utf8').trim());
+      expect(Number.isFinite(leaderPid)).toBe(true);
+      expect(Number.isFinite(childPid)).toBe(true);
+
+      // The leader reacts to SIGTERM and exits promptly — well before the 10s SIGKILL
+      // escalation deadline — while its same-group child (ignoring SIGTERM) is still
+      // alive right after that.
+      await waitFor(() => {
+        try {
+          process.kill(leaderPid, 0);
+          return false; // still alive
+        } catch {
+          return true; // ESRCH — leader exited on SIGTERM
+        }
+      }, 5_000);
+      expect(() => process.kill(childPid, 0)).not.toThrow();
+
+      // The SIGKILL escalation must still reach the surviving group member ~10s after
+      // the backstop fired, even though the leader is long gone and its own 'exit'
+      // event already happened. Before the fix, the leader's 'exit' cancelled the
+      // escalation and this child lived forever.
+      await waitFor(() => {
+        try {
+          process.kill(childPid, 0);
+          return false; // still alive
+        } catch {
+          return true; // ESRCH — reaped by the group SIGKILL
         }
       }, 15_000);
     } finally {

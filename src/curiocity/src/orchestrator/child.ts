@@ -118,17 +118,32 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
       }
     };
 
-    // (R1) `killTimer` schedules the SIGKILL escalation and must NOT be cancelled by
-    // `finish()` — `finish()` resolves the returned promise (so the orchestrator can move
-    // on to the next trial) but that is orthogonal to whether the child process tree is
-    // actually dead yet. Only clear it once the child has genuinely gone away ('exit').
-    // Before this fix, `finish()` cleared `killTimer` unconditionally, so the very
-    // `finish()` call inside the timeout handler below cancelled the SIGKILL it had just
-    // scheduled a line earlier — a child that ignores SIGTERM then lived forever.
+    // (R1) `killTimer`/`killPoll` schedule the SIGKILL escalation and must NOT be
+    // cancelled by `finish()` — `finish()` resolves the returned promise (so the
+    // orchestrator can move on to the next trial) but that is orthogonal to whether the
+    // child process TREE is actually dead yet. Before this fix, `finish()` cleared
+    // `killTimer` unconditionally, so the very `finish()` call inside the timeout
+    // handler below cancelled the SIGKILL it had just scheduled a line earlier — a
+    // child that ignores SIGTERM then lived forever.
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let killPoll: ReturnType<typeof setInterval> | undefined;
     const clearKillTimer = (): void => {
       if (killTimer !== undefined) clearTimeout(killTimer);
       killTimer = undefined;
+      if (killPoll !== undefined) clearInterval(killPoll);
+      killPoll = undefined;
+    };
+
+    // (F7) `process.kill(-pid, 0)` probes whether the GROUP still has any member alive.
+    // Only ESRCH means "no such process/group" (gone); EPERM (exists, just not
+    // signalable) and any other error mean it is still there.
+    const isGroupGone = (pid: number): boolean => {
+      try {
+        process.kill(-pid, 0);
+        return false;
+      } catch (err) {
+        return (err as NodeJS.ErrnoException)?.code === 'ESRCH';
+      }
     };
 
     const finish = (res: ChildTrialResult): void => {
@@ -141,12 +156,42 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
     // (C1/C2) The child's own engine deadline (lifecycle.ts) is set to expire well
     // before this fires, so in normal operation the child exits on its own and this
     // timer is cleared first. This is a BACKSTOP: SIGTERM first (letting a still-alive
-    // child unwind through its own timeout/teardown path), SIGKILL only if it ignores
-    // that for 10s. The SIGKILL timer survives `finish()` (see `clearKillTimer` above)
-    // and is cancelled only by the child's own 'exit' event.
+    // child unwind through its own timeout/teardown path), SIGKILL only if the GROUP
+    // still has a member alive 10s later.
+    //
+    // (F7) SIGTERM only reaches the group; it does NOT guarantee every member exits.
+    // The curion (group leader) can exit on its own SIGTERM handling while a same-group
+    // child it spawned (e.g. a teardown/setup subprocess trapping TERM) ignores it and
+    // survives, orphaned. So the escalation polls the GROUP — via `process.kill(-pid,
+    // 0)`, not just the leader's own 'exit' event — and only sends SIGKILL, at the
+    // deadline, if anything of the group remains; it then stops. This never keeps the
+    // parent alive past the fixed 10s escalation window.
     const timer = setTimeout(() => {
       killTree('SIGTERM');
-      killTimer = setTimeout(() => killTree('SIGKILL'), 10_000);
+      const pid = child.pid;
+      if (pid === undefined) {
+        // No pid to address the group by — fall back to a single-shot SIGKILL.
+        killTimer = setTimeout(() => killTree('SIGKILL'), 10_000);
+      } else {
+        const POLL_MS = 100;
+        const SIGKILL_AT_MS = 10_000;
+        let elapsed = 0;
+        killPoll = setInterval(() => {
+          if (isGroupGone(pid)) {
+            clearKillTimer();
+            return;
+          }
+          elapsed += POLL_MS;
+          if (elapsed >= SIGKILL_AT_MS) {
+            try {
+              process.kill(-pid, 'SIGKILL');
+            } catch {
+              /* ESRCH: group already gone */
+            }
+            clearKillTimer();
+          }
+        }, POLL_MS);
+      }
       finish({ result: synthResult(spec, 'timeout', Date.now() - started), wroteArtifacts: false });
     }, timeoutMs);
 
@@ -183,10 +228,15 @@ export function runChildTrial(opts: RunChildOptions): Promise<ChildTrialResult> 
     });
 
     child.on('exit', () => {
-      // (R1) The child is genuinely gone now — no SIGKILL escalation is needed (or, if
-      // already sent, none is needed anymore). This is the only place `killTimer` is
-      // cleared, so a still-alive, SIGTERM-ignoring child always gets its SIGKILL.
-      clearKillTimer();
+      // (R1/F7) The LEADER exiting does not mean the whole process GROUP is gone — a
+      // same-group child that ignores SIGTERM can outlive it. Only stop the escalation
+      // here once the group itself is confirmed gone; otherwise leave the poll started
+      // in the timeout handler above running so it can still SIGKILL whatever remains
+      // at the deadline. When no escalation was ever scheduled (normal completion, the
+      // backstop never fired) `killPoll`/`killTimer` are unset and this is a no-op.
+      if (child.pid === undefined || isGroupGone(child.pid)) {
+        clearKillTimer();
+      }
       if (resultMsg) {
         finish({ result: resultMsg, wroteArtifacts: true });
         return;
