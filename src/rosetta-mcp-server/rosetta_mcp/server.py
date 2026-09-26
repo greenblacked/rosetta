@@ -802,8 +802,15 @@ class RequestLoggingMiddleware:
         is_sse_path = path.startswith("/mcp")
 
         query = self._decode_header(query_string) or ""
-        # Security: redact query string for auth endpoints (OAuth callback carries code/state).
-        logged_query = "<redacted>" if path.startswith("/auth") else query
+        # Security: redact query string for auth endpoints (OAuth callback carries
+        # code/state, /consent carries txn_id, /token exchanges the code). The
+        # configured callback path is matched exactly since an operator can set
+        # ROSETTA_OAUTH_CALLBACK_PATH to any value (B6).
+        logged_query = (
+            "<redacted>"
+            if path == _CONFIG.oauth_callback_path or path.startswith(("/auth", "/oauth", "/consent", "/token"))
+            else query
+        )
         # REQ-OBS-1: earliest possible request log
         _logger.info(
             "%s method=%s path=%s query=%s client=%s user_agent=%s",
