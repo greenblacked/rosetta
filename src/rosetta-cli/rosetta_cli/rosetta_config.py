@@ -218,11 +218,16 @@ class RosettaConfig:
                     f"\nPlease create a .env file with RAGFLOW_BASE_URL and RAGFLOW_API_KEY"
                 )
             env_path = discovered_env_path
-            # The --env NAME flag is only meaningfully "explicit" when discovery
-            # actually found the environment-specific file (.env.<environment>).
-            # A fallback to the generic .env is indistinguishable from plain
-            # auto-discovery and must not override pre-existing shell env vars.
-            if environment is not None and env_path.name == f".env.{environment}":
+            # The --env NAME flag is "explicit" either when discovery actually found
+            # the environment-specific file (.env.<environment>), or when the file
+            # came from ROSETTA_CLI_ENV_FILE - itself an explicit user choice that
+            # find_env_file() honors ahead of any directory search. A fallback to
+            # the generic .env is indistinguishable from plain auto-discovery and
+            # must not override pre-existing shell env vars.
+            env_file_var = os.getenv(ENV_FILE_ENV_VAR)
+            if env_file_var and env_path == Path(env_file_var).expanduser():
+                explicit = True
+            elif environment is not None and env_path.name == f".env.{environment}":
                 explicit = True
 
         # Load environment variables from file. Override pre-existing shell env
