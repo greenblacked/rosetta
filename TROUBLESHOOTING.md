@@ -68,7 +68,7 @@ For full local development setup, see the [Developer Guide](DEVELOPER_GUIDE.md).
 ### Local Development Setup
 
 **"OPENAI_API_KEY not set" or missing environment variables**
-- Copy the dev environment file: `cp src/rosetta-cli/.env.dev .env`
+- Copy the env template: `cp src/rosetta-cli/env.template .env` (fill in dev RAGFlow URL/key)
 - Edit `.env` and fill in your API keys
 
 **"Port is already in use"**
@@ -85,7 +85,7 @@ Read more about CLI commands and change detection in [MCP Architecture — Roset
 
 **"Connection refused" or "Authentication failed"**
 - Verify Rosetta Server (RAGFlow) is running
-- Check that `.env` has the correct server URL and credentials (`cp src/rosetta-cli/.env.dev .env` if starting fresh)
+- Check that `.env` has the correct server URL and credentials (`cp src/rosetta-cli/env.template .env` if starting fresh, then fill in dev RAGFlow URL/key)
 - Run: `uvx rosetta-cli@latest verify` to test connectivity
 
 ### Parser Failures

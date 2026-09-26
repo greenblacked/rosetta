@@ -69,7 +69,7 @@ uvx rosetta-cli@latest verify
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-cp src/rosetta-cli/.env.dev .env
+cp src/rosetta-cli/env.template .env  # fill in dev RAGFlow URL/key
 venv/bin/rosetta-cli verify
 ```
 
