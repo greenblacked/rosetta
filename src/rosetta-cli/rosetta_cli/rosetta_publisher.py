@@ -171,6 +171,7 @@ class ContentPublisher:
         print("Reading files...")
         all_caches = []   # ALL successfully read caches (for cleanup/orphan detection)
         results = []
+        read_failures = 0
 
         for file in files:
             try:
@@ -185,6 +186,18 @@ class ContentPublisher:
 
             except Exception as e:
                 print(f"✗ Error reading {file.name}: {e}")
+                read_failures += 1
+                try:
+                    display_path = str(file.relative_to(self.workspace_root))
+                except ValueError:
+                    display_path = str(file)
+                results.append(PublishResult(
+                    success=False,
+                    document_id="",
+                    file_path=display_path,
+                    tags=[],
+                    error=str(e),
+                ))
                 continue
 
         # Duplicate cleanup: remove stale server copies of the same file (before publish)
@@ -270,7 +283,9 @@ class ContentPublisher:
         # When publishing a subfolder, local caches cover only a subset of server
         # docs — running orphan detection would delete everything else.
         is_full_publish = folder.name == "instructions" or folder.parent == self.workspace_root
-        if is_full_publish:
+        if read_failures > 0:
+            print(f"\nOrphan detection skipped ({read_failures} file(s) failed to read)")
+        elif is_full_publish:
             managed_domains_by_dataset: dict[str, set[str]] = {}
             for cache in all_caches:
                 dataset_name = self._resolve_dataset_name({"release": cache.release})
