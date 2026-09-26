@@ -450,7 +450,19 @@ async def _healthz_handler(request: Any) -> Any:
     checked_at = time.time()
     try:
         def _probe() -> None:
-            _RAGFLOW.get("/datasets", params={"page": 1, "page_size": 1})
+            # RAGFlow's SDK .get() never calls raise_for_status(), so an HTTP
+            # error or an application-level error code (e.g. an invalid API
+            # key) would otherwise be reported as "ok" (B4).
+            res = _RAGFLOW.get("/datasets", params={"page": 1, "page_size": 1})
+            status_code = getattr(res, "status_code", 200)
+            if status_code >= 400:
+                raise RuntimeError(f"ragflow status {status_code}")
+            try:
+                body = res.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict) and body.get("code", 0) != 0:
+                raise RuntimeError(str(body.get("message", "ragflow error")))
 
         await asyncio.wait_for(
             asyncio.to_thread(_probe),
@@ -790,8 +802,15 @@ class RequestLoggingMiddleware:
         is_sse_path = path.startswith("/mcp")
 
         query = self._decode_header(query_string) or ""
-        # Security: redact query string for auth endpoints (OAuth callback carries code/state).
-        logged_query = "<redacted>" if path.startswith("/auth") else query
+        # Security: redact query string for auth endpoints (OAuth callback carries
+        # code/state, /consent carries txn_id, /token exchanges the code). The
+        # configured callback path is matched exactly since an operator can set
+        # ROSETTA_OAUTH_CALLBACK_PATH to any value (B6).
+        logged_query = (
+            "<redacted>"
+            if path == _CONFIG.oauth_callback_path or path.startswith(("/auth", "/oauth", "/consent", "/token"))
+            else query
+        )
         # REQ-OBS-1: earliest possible request log
         _logger.info(
             "%s method=%s path=%s query=%s client=%s user_agent=%s",

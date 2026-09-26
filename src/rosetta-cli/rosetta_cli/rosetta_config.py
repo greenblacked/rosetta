@@ -188,6 +188,11 @@ class RosettaConfig:
             # Auto-discovery (looks for .env)
             >>> config = RosettaConfig.from_env()
         """
+        # Explicit --env / --env-file values must override any pre-existing shell
+        # env vars (the CLI documents --env as an override). Auto-discovered .env
+        # files keep the historical, non-overriding behaviour.
+        explicit = env_file is not None or environment is not None
+
         # Determine which file to load
         env_path: Path
         if env_file:
@@ -211,8 +216,9 @@ class RosettaConfig:
                 )
             env_path = discovered_env_path
         
-        # Load environment variables from file
-        load_dotenv(env_path)
+        # Load environment variables from file. Override pre-existing shell env
+        # vars only when the caller explicitly asked for this file/environment.
+        load_dotenv(env_path, override=explicit)
         
         return cls.from_env_vars(environment=environment)
     

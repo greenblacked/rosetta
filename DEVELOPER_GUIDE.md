@@ -235,7 +235,7 @@ Use this when changing publish, verify, or cleanup commands.
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-cp .env.dev .env  # Points at dev RAGFlow instance
+cp src/rosetta-cli/env.template .env  # fill in dev RAGFlow URL/key (ask maintainers)
 venv/bin/rosetta-cli verify
 ```
 
@@ -250,11 +250,11 @@ cd src/rosetta-cli
 ../../venv/bin/python -m rosetta_cli publish ../../instructions --dry-run --env dev
 ```
 
-After the package is published, test the packaged CLI with `uvx`:
+After the package is published, test the packaged CLI with `uvx` (run from the repo root):
 
 ```bash
 uvx rosetta-cli@latest verify --env dev
-uvx rosetta-cli@latest publish ../instructions --dry-run --env dev
+uvx rosetta-cli@latest publish instructions --dry-run --env dev
 ```
 
 The `--dry-run` flag shows what would be published (new, changed, unchanged files) without writing anything to RAGFlow.
@@ -267,10 +267,11 @@ The `--dry-run` flag shows what would be published (new, changed, unchanged file
 
 ```bash
 # From repo root, with the root venv activated
-cp .env.dev .env && VERSION=r3 venv/bin/python src/rosetta-mcp-server/validation/verify_mcp.py
+cp src/rosetta-cli/env.template .env  # fill in dev RAGFlow URL/key
+VERSION=r3 venv/bin/python src/rosetta-mcp-server/validation/verify_mcp.py
 
 # With Redis (tests OAuth client/token storage — the dual-backend store path)
-cp .env.dev .env && REDIS_URL="redis://localhost:6379/0" VERSION=r3 venv/bin/python src/rosetta-mcp-server/validation/verify_mcp.py
+REDIS_URL="redis://localhost:6379/0" VERSION=r3 venv/bin/python src/rosetta-mcp-server/validation/verify_mcp.py
 ```
 
 Run r3; also r2 when backporting. If your change touches Redis-dependent features, run with and without `REDIS_URL`.
@@ -339,7 +340,7 @@ After local validation passes, test end-to-end against the dev environment.
 ### 1. Publish instructions to dev
 
 ```bash
-cp .env.dev .env
+cp src/rosetta-cli/env.template .env  # fill in dev RAGFlow URL/key
 uvx rosetta-cli@latest publish instructions
 ```
 
