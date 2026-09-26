@@ -316,7 +316,7 @@ describe('TerminalSession', () => {
     const pidDir = mkdtempSync(join(tmpdir(), 'curiocity-f8-'));
     const pidFile = join(pidDir, 'pid');
     try {
-      const script = `trap '' TERM; sleep 30 & echo $! > ${pidFile}; echo BACKGROUNDED; exit 0`;
+      const script = `trap '' HUP TERM; sleep 30 & echo $! > ${pidFile}; echo BACKGROUNDED; exit 0`;
       const s = new TerminalSession({
         command: '/bin/sh',
         args: ['-c', script],
