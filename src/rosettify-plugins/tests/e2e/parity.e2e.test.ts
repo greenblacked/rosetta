@@ -121,8 +121,13 @@ describe('Parity E2E — per-target structural parity (NFR-0001)', () => {
   });
 
   it('deterministicHooks:false ⇒ no *.js hook bundles in any target output', () => {
+    // Hook bundles only ever live under a hooks directory (hooks/, .codex/hooks/, .github/hooks/,
+    // etc). A `.js` file elsewhere — e.g. a skill's own scripts/*.js asset (#330's harness
+    // skill) — is source content, not a hook bundle, and must not trip this gate.
     for (const target of TARGETS) {
-      const js = [...actualPaths.get(target)!].filter((p) => p.endsWith('.js'));
+      const js = [...actualPaths.get(target)!].filter(
+        (p) => p.endsWith('.js') && !p.includes('skills/'),
+      );
       expect(js, `${target} must contain no .js bundles when deterministicHooks is false`).toEqual([]);
     }
   });

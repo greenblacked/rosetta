@@ -217,10 +217,10 @@ describe('Profile E2E — profiled build (--profile lightweight)', () => {
       path.join(outputDir, 'core-cursor-light', 'agents', 'reviewer.md'), 'utf-8');
     expect(cursorReviewer).toMatch(/^model: gemini-3\.7-flash$/m);
 
-    // Copilot: architect's light list leads with gpt-5.6-sol-high, mapped to Copilot's display name.
+    // Copilot: architect's light list leads with claude-opus-5-high, mapped to Copilot's display name.
     const copilotArchitect = fs.readFileSync(
       path.join(outputDir, 'core-copilot-light', 'agents', 'architect.agent.md'), 'utf-8');
-    expect(copilotArchitect).toMatch(/^model: GPT-5\.6 Sol$/m);
+    expect(copilotArchitect).toMatch(/^model: Claude Opus 5$/m);
 
     // Codex: engineer's light list's first gpt- token is gpt-5.6-luna-xhigh, split into model +
     // reasoning effort (the base list's first gpt- token is gpt-5.4-medium).
