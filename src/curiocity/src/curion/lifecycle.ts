@@ -345,7 +345,10 @@ export async function runTrial(spec: TrialSpec, opts: RunTrialOptions): Promise<
       }
       phases.teardownMs = Date.now() - teardownStart;
     }
-    session?.kill();
+    // (R6) Await the kill so the SIGKILL escalation (§2, terminal/session.ts) is
+    // guaranteed to run to completion before this Curion exits, instead of racing an
+    // unref'd timer against process exit.
+    await session?.kill();
   }
 
   // --- Workspace retention (§7 step 8) --------------------------------------

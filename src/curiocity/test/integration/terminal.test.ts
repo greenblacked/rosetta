@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { TerminalSession } from '../../src/terminal/session';
 import type { SubmitMode } from '../../src/terminal/types';
@@ -266,4 +269,40 @@ describe('TerminalSession', () => {
       }
     }, 8000);
   });
+
+  it('R6: kill() resolves only once the SIGTERM-ignoring group is actually gone (not fire-and-forget)', async () => {
+    // Before the fix, `kill()` was synchronous: it sent SIGTERM and scheduled the
+    // SIGKILL escalation on an `.unref()`'d timer, then returned immediately. A caller
+    // that `await`s the (non-promise) return value sees that resolve at once — long
+    // before the group is actually dead — and, worse, if nothing else keeps the event
+    // loop alive (the normal teardown case), the process exits before the unref'd timer
+    // ever fires, so the escalation is dropped entirely and the agent survives.
+    //
+    // `trap '' TERM` makes the leader itself ignore SIGTERM, so only the 5s SIGKILL
+    // escalation can end it. Awaiting `kill()` must not return until that has happened.
+    const pidDir = mkdtempSync(join(tmpdir(), 'curiocity-r6-'));
+    const pidFile = join(pidDir, 'pid');
+    try {
+      const script = `trap '' TERM; echo $$ > ${pidFile}; echo READY; sleep 30`;
+      const s = new TerminalSession({
+        command: '/bin/sh',
+        args: ['-c', script],
+        cwd: process.cwd(),
+        env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin' },
+        submit: 'enter',
+      });
+
+      await waitFor(() => s.snapshot().includes('READY'));
+      const pid = Number(readFileSync(pidFile, 'utf8').trim());
+      expect(() => process.kill(pid, 0)).not.toThrow(); // alive, trap installed
+
+      await s.kill();
+
+      // By the time the awaited kill() resolves, the SIGKILL escalation must already
+      // have reaped the SIGTERM-immune process.
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      rmSync(pidDir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
