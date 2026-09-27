@@ -1,9 +1,15 @@
 export { parseConfig, loadConfig } from './config.js';
 export { createAnthropicClient, createOptimizeClient, resolveAnthropicBaseURL } from './anthropic-client.js';
 export type { StreamingAnthropicClient } from './anthropic-client.js';
-export { runBenchSuite } from './runner.js';
-export type { ProgressCallback } from './runner.js';
+export { runBenchSuite, withRetry, createLimiter } from './runner.js';
+export type { ProgressCallback, Limiter } from './runner.js';
 export { buildReport, renderMarkdownReport, writeReportFiles } from './report.js';
+export { parseRouteConfig, loadRouteConfig, validateCasesAgainstTargets } from './route-config.js';
+export { loadRouterContext } from './route-context.js';
+export type { RouterContext } from './route-context.js';
+export { runRouteEval } from './route-runner.js';
+export type { RouteProgressCallback } from './route-runner.js';
+export { buildRouteReport, compareToBaseline, renderRouteMarkdownReport, writeRouteReportFiles } from './route-report.js';
 export { computeFieldStats } from './stats.js';
 export { DEFAULT_PRICING, resolvePricing, computeCostUsd } from './pricing.js';
 export {

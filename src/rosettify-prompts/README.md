@@ -66,7 +66,9 @@ Each run writes `report.json` (raw per-turn data for every run) and
 | --- | --- |
 | `bench` (default) | Run all suites and write a report |
 | `optimize` | Rewrite prompt/skill files through a single-conversation, loss-reviewed pipeline |
-| `validate [path]` | Validate a config without calling the API |
+| `route` | Evaluate skill/workflow routing accuracy via a forced tool call (no LLM judge) |
+| `validate [path]` | Validate a `bench` config without calling the API |
+| `validate-route <path>` | Validate a `route` config without calling the API |
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
@@ -163,6 +165,91 @@ Outputs:
 
 Use `--dry-run` to validate the command shape and print the exact stage plan
 without creating an API client or writing files.
+
+## Route
+
+`route` evaluates whether Rosetta's skill/workflow **routing** (driven entirely by the
+`rosetta` skill plus every skill/workflow's `description:`) sends a given user request
+to the right target. Each case is scored by a **forced tool call**: the model must call
+a `select_route` tool whose `target` parameter is an enum of every known
+`"<kind>:<name>"` target, so scoring is deterministic string equality — never an LLM
+judge.
+
+```bash
+# validate a routing config, optionally cross-checked against a context dir
+npx -y rosettify-prompts@latest validate-route tests/routing/routes.sample.json \
+  --context ../../plugins/core-claude
+
+# print planned jobs without calling the API
+npx -y rosettify-prompts@latest route \
+  --config tests/routing/routes.sample.json \
+  --context ../../plugins/core-claude \
+  --dry-run
+
+# run it
+npx -y rosettify-prompts@latest route \
+  --config tests/routing/routes.sample.json \
+  --context ../../plugins/core-claude \
+  --out results/route-run
+
+# fail (exit 1) if accuracy drops more than 5 percentage points vs a prior run
+npx -y rosettify-prompts@latest route \
+  --config tests/routing/routes.sample.json \
+  --context ../../plugins/core-claude \
+  --baseline results/route-baseline/route-report.json \
+  --max-accuracy-drop 5
+```
+
+`--context <dir>` is a plugin (`plugins/core-claude`) or instructions
+(`instructions/r3/core`) directory — both share the same `skills/*/SKILL.md` +
+`workflows/*.md` shape. Targets are resolved from it directly:
+
+- The `rosetta` skill's body (the router persona/process) is read separately and never
+  itself a target — it primes the routing system prompt.
+- Every other skill whose `SKILL.md` is model-invocable (no
+  `disable-model-invocation: true`, no `user-invocable: false`) becomes a `skill:<name>`
+  target.
+- Every top-level workflow file (`tags: ["workflow"]`, not a phase file) becomes a
+  `workflow:<name>` target. Phase files (e.g. `testgen-flow-question-generation.md`) are
+  excluded automatically.
+
+A routing config is JSON with a list of cases:
+
+```jsonc
+{
+  "model": "claude-haiku-4-5", // small model tier by default; routing is classification, not generation
+  "repetitions": 1,             // attempts per case, for stability across noisy picks
+  "concurrency": 5,
+  "cases": [
+    {
+      "id": "coding-fix-bug",
+      "prompt": "There's a bug where checkout throws a null pointer on an empty cart. Fix it.",
+      "expect": { "kind": "workflow", "name": "coding-flow" }
+    }
+  ]
+}
+```
+
+`route --config <path>` cross-checks every case's `expect` against the resolved
+`--context` targets before making any API call, so a typo (e.g. `codnig-flow`) fails
+fast with the exact case id and the list of known targets.
+
+`tests/routing/routes.sample.json` in this package seeds ~10 cases against
+`plugins/core-claude`'s current workflows and skills. Use it as a template, not as the
+schema.
+
+Output (`route-report.json` + `route-report.md` under `--out`, default
+`results/route-<timestamp>`):
+
+- **Accuracy**: overall correct/total across all `(case, repetition)` attempts.
+- **Per-case results**: each case's own accuracy plus a breakdown of what was actually
+  selected across its repetitions (`(no selection)` for a malformed/missing tool call,
+  `(error)` for a failed API call after retries).
+- **Confusion matrix**: `expected -> actual` counts, so you can see which descriptions
+  are stealing traffic from which.
+- **Baseline comparison** (with `--baseline`): delta in percentage points against a
+  prior `route-report.json`'s accuracy, and whether it exceeds `--max-accuracy-drop`
+  (default 5pp) — the command exits 1 on a regression.
 
 ## Writing a config
 

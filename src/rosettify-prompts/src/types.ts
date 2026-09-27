@@ -187,3 +187,86 @@ export interface BenchReport {
   runs: RunResult[];
   summaries: VariantSummary[];
 }
+
+// ---- routing eval (`rosettify-prompts route`) -----------------------------------------------------
+
+export type RouteTargetKind = 'skill' | 'workflow';
+
+/** A single routable target discovered from a plugin or instructions directory: a top-level skill
+ * (SKILL.md, model-invocable) or a top-level workflow (tags include "workflow", not a phase file). */
+export interface RouteTarget {
+  kind: RouteTargetKind;
+  name: string;
+  description: string;
+}
+
+export interface RouteCaseConfig {
+  id: string;
+  prompt: string;
+  expect: { kind: RouteTargetKind; name: string };
+  /** Documentation-only: target keys ("kind:name") this case is expected NOT to select. Not scored
+   * separately — picking a forbidden target that isn't `expect` is already an incorrect attempt. */
+  forbid?: string[];
+}
+
+export interface RouteConfig {
+  model: string;
+  repetitions: number;
+  concurrency: number;
+  cases: RouteCaseConfig[];
+}
+
+export interface RouteAttemptResult {
+  caseId: string;
+  repetition: number;
+  prompt: string;
+  expected: { kind: RouteTargetKind; name: string };
+  /** null when the model's forced tool call was missing or malformed (still scored as incorrect). */
+  actual: { kind: RouteTargetKind; name: string } | null;
+  correct: boolean;
+  error?: string;
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+}
+
+export interface RouteCaseSummary {
+  caseId: string;
+  prompt: string;
+  expected: { kind: RouteTargetKind; name: string };
+  attempts: number;
+  correct: number;
+  accuracy: number;
+  /** "kind:name" (or "(no selection)"/"(error)") -> attempt count for this case. */
+  actualBreakdown: Record<string, number>;
+}
+
+export interface RouteConfusionEntry {
+  expectedKey: string;
+  actualKey: string;
+  count: number;
+}
+
+export interface RouteBaselineComparison {
+  path: string;
+  accuracy: number;
+  /** report.accuracy - baseline.accuracy, in percentage points. */
+  delta: number;
+  maxAllowedDrop: number;
+  regression: boolean;
+}
+
+export interface RouteReport {
+  generatedAt: string;
+  contextDir: string;
+  model: string;
+  targets: RouteTarget[];
+  cases: RouteCaseSummary[];
+  attempts: RouteAttemptResult[];
+  totalAttempts: number;
+  correctAttempts: number;
+  accuracy: number;
+  confusionMatrix: RouteConfusionEntry[];
+  baseline?: RouteBaselineComparison;
+}

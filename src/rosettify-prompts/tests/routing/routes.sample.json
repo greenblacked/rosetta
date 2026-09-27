@@ -1,0 +1,67 @@
+{
+  "model": "claude-haiku-4-5",
+  "repetitions": 1,
+  "concurrency": 5,
+  "cases": [
+    {
+      "id": "coding-fix-bug",
+      "prompt": "There's a bug where the checkout page throws a null pointer exception when the cart is empty. Please fix it and add a regression test.",
+      "expect": { "kind": "workflow", "name": "coding-flow" }
+    },
+    {
+      "id": "testgen-from-jira",
+      "prompt": "Generate test cases for JIRA-4821 and export them to our Test Management System.",
+      "expect": { "kind": "workflow", "name": "testgen-flow" }
+    },
+    {
+      "id": "security-review",
+      "prompt": "We need an authorized security review of the payment service before the audit next week, with remediation tasks captured.",
+      "expect": { "kind": "workflow", "name": "security-flow" }
+    },
+    {
+      "id": "modernization-monolith",
+      "prompt": "Help us plan converting this C++ monolith into Java microservices.",
+      "expect": { "kind": "workflow", "name": "modernization-flow" }
+    },
+    {
+      "id": "init-workspace-new-repo",
+      "prompt": "This is a brand new repository. Initialize it with Rosetta: build context, discovery, and documentation.",
+      "expect": { "kind": "workflow", "name": "init-workspace-flow" }
+    },
+    {
+      "id": "research-deep-dive",
+      "prompt": "Do a deep research pass on how our competitors implement rate limiting, with grounded references.",
+      "expect": { "kind": "workflow", "name": "research-flow" }
+    },
+    {
+      "id": "requirements-authoring",
+      "prompt": "Draft and review formal requirements and specifications for the new notifications feature.",
+      "expect": { "kind": "workflow", "name": "requirements-authoring-flow" }
+    },
+    {
+      "id": "ui-aqa-e2e",
+      "prompt": "Automate end-to-end UI tests for the login and checkout flows using page objects.",
+      "expect": { "kind": "workflow", "name": "ui-aqa-flow" }
+    },
+    {
+      "id": "help-what-can-you-do",
+      "prompt": "What can you do, Rosetta?",
+      "expect": { "kind": "workflow", "name": "help-flow" }
+    },
+    {
+      "id": "code-analysis-legacy",
+      "prompt": "Reverse-engineer this legacy codebase into grounded architecture docs and requirements capture, since nothing is documented.",
+      "expect": { "kind": "workflow", "name": "code-analysis-flow" }
+    },
+    {
+      "id": "planning-session-graph",
+      "prompt": "Break this feature down into an execution-ready graph of AI session plans with intent and acceptance criteria.",
+      "expect": { "kind": "skill", "name": "planning" }
+    },
+    {
+      "id": "debugging-flaky-test",
+      "prompt": "This test passes locally but fails intermittently in CI; help me root-cause it.",
+      "expect": { "kind": "skill", "name": "debugging" }
+    }
+  ]
+}

@@ -9,6 +9,10 @@ import { buildReport, writeReportFiles } from './report.js';
 import { DEFAULT_OPTIMIZE_ANTHROPIC_BETAS, OPTIMIZE_STEPS, runPromptOptimization } from './optimize.js';
 import { createTerminalAsker } from './ask.js';
 import { colorsEnabled, createPalette } from './colors.js';
+import { loadRouteConfig, validateCasesAgainstTargets } from './route-config.js';
+import { loadRouterContext } from './route-context.js';
+import { runRouteEval } from './route-runner.js';
+import { buildRouteReport, compareToBaseline, writeRouteReportFiles } from './route-report.js';
 import type { JudgeMode, SupportingFile, ThinkingEffort } from './types.js';
 
 const program = new Command();
@@ -305,6 +309,108 @@ program
       );
     },
   );
+
+program
+  .command('route')
+  .description(
+    'Evaluate skill/workflow routing accuracy: each case is scored by a forced tool call (no LLM judge)',
+  )
+  .requiredOption('--config <path>', 'path to a routing cases config (JSON)')
+  .requiredOption(
+    '--context <dir>',
+    'plugin or instructions directory containing skills/ and workflows/ (e.g. plugins/core-claude or instructions/r3/core)',
+  )
+  .option('--model <id>', 'override the model id used for routing calls')
+  .option('--concurrency <n>', 'override concurrency from config', parsePositiveInteger)
+  .option('-o, --out <dir>', 'output directory for the report (default: results/route-<timestamp>)')
+  .option('--baseline <path>', 'a previous route-report.json to compare accuracy against')
+  .option(
+    '--max-accuracy-drop <pct>',
+    'fail (exit 1) if accuracy drops more than this many percentage points vs --baseline (default: 5)',
+    (value: string) => {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        throw new Error('--max-accuracy-drop must be a non-negative number');
+      }
+      return parsed;
+    },
+    5,
+  )
+  .option('--dry-run', 'validate config/context and print the planned jobs without calling the API', false)
+  .action(async (opts: {
+    config: string;
+    context: string;
+    model?: string;
+    concurrency?: number;
+    out?: string;
+    baseline?: string;
+    maxAccuracyDrop: number;
+    dryRun: boolean;
+  }) => {
+    const config = loadRouteConfig(opts.config);
+    if (opts.model) config.model = opts.model;
+    if (opts.concurrency !== undefined) config.concurrency = opts.concurrency;
+
+    const router = loadRouterContext(opts.context);
+    validateCasesAgainstTargets(config, router.targets);
+
+    const totalJobs = config.cases.length * config.repetitions;
+
+    if (opts.dryRun) {
+      console.log(`Routing config OK: ${config.cases.length} case(s), ${totalJobs} attempt(s) planned.`);
+      console.log(`Context: ${opts.context} (${router.targets.length} targets)`);
+      console.log(`Rosetta skill loaded: ${router.rosettaSkillBody ? 'yes' : 'no'}`);
+      console.log(`Model: ${config.model}, repetitions: ${config.repetitions}, concurrency: ${config.concurrency}`);
+      for (const routeCase of config.cases) {
+        console.log(`- ${routeCase.id}: expect ${routeCase.expect.kind}:${routeCase.expect.name}`);
+      }
+      return;
+    }
+
+    const client = createAnthropicClient();
+    console.log(`Running ${totalJobs} routing attempt(s) with concurrency=${config.concurrency}...`);
+
+    const attempts = await runRouteEval(client, config, router.targets, router.rosettaSkillBody, (done, total, attempt) => {
+      const status = attempt.error ? `ERROR: ${attempt.error}` : attempt.correct ? 'correct' : 'WRONG';
+      const actual = attempt.actual ? `${attempt.actual.kind}:${attempt.actual.name}` : '(none)';
+      console.log(`[${done}/${total}] ${attempt.caseId}#${attempt.repetition} — expected ${attempt.expected.kind}:${attempt.expected.name}, got ${actual} — ${status}`);
+    });
+
+    let report = buildRouteReport(opts.context, config.model, router.targets, attempts);
+    if (opts.baseline) {
+      report = compareToBaseline(report, opts.baseline, opts.maxAccuracyDrop);
+    }
+
+    const outDir =
+      opts.out ?? path.join(process.cwd(), 'results', `route-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+    const { jsonPath, markdownPath } = writeRouteReportFiles(report, outDir);
+
+    console.log('');
+    console.log(`Accuracy: ${(report.accuracy * 100).toFixed(1)}% (${report.correctAttempts}/${report.totalAttempts})`);
+    console.log(`Report written to:\n  ${jsonPath}\n  ${markdownPath}`);
+
+    if (report.baseline?.regression) {
+      console.error(
+        `Accuracy regression: dropped ${Math.abs(report.baseline.delta).toFixed(1)}pp vs baseline ` +
+          `(max allowed ${report.baseline.maxAllowedDrop}pp).`,
+      );
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('validate-route')
+  .description('Validate a routing config without calling the API')
+  .argument('<path>', 'path to a routing cases config (JSON)')
+  .option('--context <dir>', 'also cross-check case expectations against this plugin/instructions directory')
+  .action((configPath: string, opts: { context?: string }) => {
+    const config = loadRouteConfig(configPath);
+    if (opts.context) {
+      const router = loadRouterContext(opts.context);
+      validateCasesAgainstTargets(config, router.targets);
+    }
+    console.log(`${configPath} is valid.`);
+  });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
