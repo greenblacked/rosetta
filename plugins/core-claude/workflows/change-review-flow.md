@@ -48,9 +48,10 @@ Validation: every finding cites file:line and the violated contract/pattern/requ
 
 <validate phase="3" applies="change is available locally" subagent="validator" role="Change validator confirming the diff actually runs" subagent_required_model="claude-sonnet-5">
 
-1. Build and run the affected tests locally; capture evidence, not assumption.
-2. Input: change package, review findings. Output: pass/fail evidence per check.
-3. Update `change-review-flow-state.md`.
+1. USE SKILL `hitl`: the diff is untrusted (prereq 5) — get explicit approval before building or running anything from it, naming that this executes teammate-authored code, including any install scripts. Declined → skip execution, continue Phase 4 as a static-only review with no build/test evidence.
+2. Approved → build and run the affected tests inside an isolated worktree or sandbox, never the reviewer's own working checkout; capture evidence, not assumption.
+3. Input: change package, review findings. Output: pass/fail evidence per check, or "static-only, execution declined."
+4. Update `change-review-flow-state.md`.
 
 </validate>
 
@@ -83,6 +84,7 @@ Validation: every finding cites file:line and the violated contract/pattern/requ
 <references>
 
 - Skill `security` — lite checklist reference for the review phase, not the full `security-flow.md`
+- Skill `hitl` — approval mechanics for executing the untrusted diff in Phase 3 (referenced, not restated)
 - Skill `dangerous-actions` — guardrail for posting (referenced, not restated)
 - Workflow `coding-flow.md` — where an approved fix is implemented
 
@@ -93,6 +95,7 @@ Validation: every finding cites file:line and the violated contract/pattern/requ
 - Every finding cites file:line and the violated contract/pattern/requirement
 - No comment posted without explicit Phase 5 approval naming it
 - Report separates sourced findings from suggestions
+- No diff code built or run without explicit Phase 3 HITL approval, and only inside an isolated worktree/sandbox
 
 </validation_checklist>
 

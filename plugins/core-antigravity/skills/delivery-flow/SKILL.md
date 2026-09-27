@@ -25,25 +25,17 @@ Validation: every drafted claim traces to plan/specs/diff; no commit, push, tag,
 
 </prerequisites>
 
-<detect_conventions phase="1" applies="ALL" subagent="executor" role="Repository convention scanner" subagent_required_model="inherit">
+<draft phase="1" applies="ALL" subagent="engineer" role="Release engineer drafting traceable delivery artifacts" subagent_required_model="inherit">
 
-1. Inventory commit style (`git log`), PR template files, CHANGELOG format, and branch naming (`gain.json` or existing branches).
-2. Input: repo files, recent commit history. Output: detected-conventions summary.
-3. Update `delivery-flow-state.md`.
-
-</detect_conventions>
-
-<draft phase="2" applies="ALL" subagent="engineer" role="Release engineer drafting traceable delivery artifacts" subagent_required_model="inherit">
-
-1. USE SKILL `change-communication` to draft commit message(s), PR description, CHANGELOG entry, and, if requested, release notes.
-2. Input: detected conventions, diff, `plans/<FEATURE>/*`, `agents/IMPLEMENTATION.md`, requirement IDs if in use. Output: drafts, each claim marked with its source.
+1. USE SKILL `change-communication` to detect repo conventions (commit style, PR template, CHANGELOG format, branch naming) and draft commit message(s), PR description, CHANGELOG entry, and, if requested, release notes. Convention detection lives in the skill; do not re-detect it here.
+2. Input: diff, `plans/<FEATURE>/*`, `agents/IMPLEMENTATION.md`, requirement IDs if in use. Output: drafts, each claim marked with its source.
 3. Release mode (aggregate since last tag): gather merged features' `agents/IMPLEMENTATION.md` entries; group release notes by audience.
 4. Required skills: `change-communication`. Recommended: `natural-writing`, `requirements-use`.
 5. Update `delivery-flow-state.md`.
 
 </draft>
 
-<user_review_delivery phase="3" applies="ALL" type="HITL">
+<user_review_delivery phase="2" applies="ALL" type="HITL">
 
 1. Present drafts with TLDR; separate sourced facts from any flagged gaps.
 2. User MUST approve: "Yes, I approve the delivery drafts" — strict approval; anything else = feedback, iterate.
@@ -51,22 +43,23 @@ Validation: every drafted claim traces to plan/specs/diff; no commit, push, tag,
 
 </user_review_delivery>
 
-<execute phase="4" applies="if user approved any git/PR/CHANGELOG action" subagent="executor" role="Bounded delivery-action operator" subagent_required_model="inherit" must-be-subagent>
+<record phase="3" applies="if user approved a CHANGELOG or IMPLEMENTATION.md write" subagent="executor" role="Bounded delivery-record writer" subagent_required_model="inherit" must-be-subagent>
 
-1. USE SKILL `dangerous-actions` before any push, PR creation, or tag; perform only the actions the user explicitly named in Phase 3.
-2. Input: approved drafts, approved action list. Output: executed actions and their results, or a stop reason.
-3. Local commit without push still requires the Phase 3 approval that named it.
-4. Never widen scope beyond the named actions; never retry a declined action.
-5. Update `delivery-flow-state.md`.
-
-</execute>
-
-<record phase="5" applies="ALL">
-
-1. Update `agents/IMPLEMENTATION.md` with what shipped and its trace; write the CHANGELOG entry only if approved in Phase 3.
-2. Mark `delivery-flow-state.md` complete.
+1. Write the CHANGELOG entry, only if named in Phase 2, and update `agents/IMPLEMENTATION.md` with what shipped and its trace — before any commit, so both land in the change being committed and the tree is clean afterward.
+2. Input: approved drafts. Output: written files, or a stop reason if not approved.
+3. Update `delivery-flow-state.md`.
 
 </record>
+
+<execute phase="4" applies="if user approved any git/PR action" subagent="executor" role="Bounded delivery-action operator" subagent_required_model="inherit" must-be-subagent>
+
+1. USE SKILL `dangerous-actions` before any commit, push, PR creation, or tag; perform only the actions the user explicitly named in Phase 2, including the Phase 3 file writes already on disk.
+2. Input: approved drafts, approved action list, Phase 3 file writes. Output: executed actions and their results, or a stop reason.
+3. Local commit without push still requires the Phase 2 approval that named it.
+4. Never widen scope beyond the named actions; never retry a declined action.
+5. Mark `delivery-flow-state.md` complete.
+
+</execute>
 
 </workflow_phases>
 
@@ -81,14 +74,14 @@ Validation: every drafted claim traces to plan/specs/diff; no commit, push, tag,
 <validation_checklist>
 
 - Every draft claim traces to plan, specs, diff, or requirement ID
-- No push, PR, tag, or CHANGELOG write without the exact Phase 3 approval naming it
+- No push, PR, tag, or CHANGELOG write without the exact Phase 2 approval naming it
 - Detected repo conventions used over generic defaults
 
 </validation_checklist>
 
 <pitfalls>
 
-- Treating Phase 3 approval of drafts as approval to execute
+- Treating Phase 2 approval of drafts as approval to execute
 - Drafting a PR description with claims not present in the diff
 - Naming a specific git/PR tool instead of describing the action generically
 

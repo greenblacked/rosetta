@@ -33,13 +33,13 @@ Triggers: writing a commit message, PR description, CHANGELOG entry, or release 
 
 <process>
 
-1. Read repo conventions: commit style, PR template, CHANGELOG format, branch naming.
+1. Detect repo conventions: commit style, PR template, CHANGELOG format, branch naming. If the invoking workflow already supplies a detected-conventions summary, use it as-is instead of re-detecting.
 2. Gather sources: diff/git status, `plans/<FEATURE>/*`, `agents/IMPLEMENTATION.md`, requirement IDs if `requirements-use` is in play.
 3. Draft commit message(s) in the detected convention; one logical change per commit.
 4. Draft the PR description: summary, rationale, spec/requirement trace, test evidence, risk notes, filling the detected template when one exists.
 5. Draft a CHANGELOG entry in the detected format and section.
 6. On request, draft release notes: USE SKILL `natural-writing`; group by audience (user-facing vs internal).
-7. Present drafts for HITL review before any execution step outside this skill.
+7. Return the drafts to the invoking workflow, each claim marked with its source; this skill does not itself gate them on HITL approval.
 8. Flag when no source material exists for a claim instead of inventing one.
 
 </process>
