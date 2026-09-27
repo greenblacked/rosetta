@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from rosetta_mcp.server import RequestLoggingMiddleware, _INFLIGHT_REGISTRY, _INFLIGHT_LOCK
+import rosetta_mcp.server as server_module
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -472,3 +473,61 @@ async def test_non_auth_path_query_logged_verbatim(caplog):
     assert any("query=foo=bar" in m for m in received), (
         f"Non-auth path query must be logged verbatim; got: {received}"
     )
+
+
+# ── B6: redaction covers the configured callback path + auth/oauth/consent/token ──
+
+@pytest.mark.asyncio
+async def test_configured_oauth_callback_path_is_redacted(caplog):
+    """An operator-configured ROSETTA_OAUTH_CALLBACK_PATH (e.g. /oauth/callback,
+    the value AUTHENTICATION.md's examples used to show) must be redacted even
+    though it does not start with '/auth'."""
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 302, "headers": []})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    scope = _make_http_scope(path="/oauth/callback", method="GET", trace_id=b"t-oauth-cb")
+    scope["query_string"] = b"code=UPSTREAM_AUTH_CODE_123&state=STATE_XYZ"
+
+    mock_config = type("Cfg", (), {"oauth_callback_path": "/oauth/callback"})()
+
+    with (
+        _patch_config(mock_config),
+        caplog.at_level(logging.INFO, logger="rosetta_mcp"),
+    ):
+        await RequestLoggingMiddleware(app)(scope, _simple_receive, _capture_send([]))
+
+    received = [r.message for r in caplog.records if "request-tracing-received" in r.message]
+    assert received, "Expected a [request-tracing-received] log line"
+    assert any("query=<redacted>" in m for m in received)
+    assert not any("UPSTREAM_AUTH_CODE_123" in m for m in received)
+
+
+@pytest.mark.asyncio
+async def test_consent_path_query_is_redacted(caplog):
+    """/consent carries a txn_id and must be redacted regardless of callback config."""
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    scope = _make_http_scope(path="/consent", method="GET", trace_id=b"t-consent")
+    scope["query_string"] = b"txn_id=TXN_SECRET"
+
+    mock_config = type("Cfg", (), {"oauth_callback_path": "/auth/callback"})()
+
+    with (
+        _patch_config(mock_config),
+        caplog.at_level(logging.INFO, logger="rosetta_mcp"),
+    ):
+        await RequestLoggingMiddleware(app)(scope, _simple_receive, _capture_send([]))
+
+    received = [r.message for r in caplog.records if "request-tracing-received" in r.message]
+    assert received, "Expected a [request-tracing-received] log line"
+    assert any("query=<redacted>" in m for m in received)
+    assert not any("TXN_SECRET" in m for m in received)
+
+
+def _patch_config(mock_config):
+    return patch.object(server_module, "_CONFIG", mock_config)

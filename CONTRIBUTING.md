@@ -50,6 +50,10 @@ AI help is welcome. These norms apply:
 - **Show the difference.** Prompt, context, and rule changes require before/after behavior examples.
 - **No fabrication.** Generated content must not introduce secrets, fake docs, fake benchmarks, or unverifiable claims.
 
+## Release Guard CI
+
+PRs touching `instructions/**`, `plugins/**`, `src/rosettify-plugins/**`, `src/hooks/**`, or a package manifest/lockfile run `ci-release-guard.yml`: a plugin-sync check (`plugins/` must match a local rebuild of the generator) and a dependency audit (`npm audit`, `pip-audit`). See [Architecture — CI Release Guard](docs/ARCHITECTURE.md#ci-release-guard) for the exact commands and the audit gate policy.
+
 ## Pull Request Checklist
 
 Before requesting review:

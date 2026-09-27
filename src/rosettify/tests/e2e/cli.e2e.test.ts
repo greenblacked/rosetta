@@ -650,4 +650,102 @@ describe("CLI — concurrent writers (FR-PLAN-0024 / FR-PLAN-0025)", () => {
     // No leftover lock directory.
     expect(fs.existsSync(file + ".lock")).toBe(false);
   }, 60_000);
+
+  // A2/FR-PLAN-0024 — first-create race: every process observes the plan file missing and
+  // races to create it via `plan upsert entire_plan`. Before the fix, the `!fs.existsSync`
+  // check in cmdUpsert's first-create branch and the direct `savePlan` call that followed it
+  // were not mutually exclusive, so most concurrent creators' phases were silently lost even
+  // though every process reported success.
+  it("10 concurrent upsert entire_plan processes racing to create the SAME missing plan: no lost writes", async () => {
+    const N = 10;
+    const file = planFile("concurrent-create.json");
+
+    const { spawn } = await import("child_process");
+    const exitCodes: number[] = await Promise.all(
+      Array.from({ length: N }, (_, i) => {
+        const phaseId = `ph-race-${i + 1}`;
+        const data = JSON.stringify({ name: "Race Plan", phases: [{ id: phaseId, name: `Phase ${i + 1}` }] });
+        const args = [BIN, "plan", "upsert", file, "entire_plan", data];
+        return new Promise<number>((resolve) => {
+          const child = spawn(NODE, args, { stdio: "pipe" });
+          child.on("close", (code) => resolve(code ?? -1));
+        });
+      }),
+    );
+
+    expect(exitCodes.every((c) => c === 0)).toBe(true);
+
+    const finalPlan = JSON.parse(fs.readFileSync(file, "utf8"));
+    const phaseIds = new Set(finalPlan.phases.map((p: { id: string }) => p.id));
+    for (let i = 1; i <= N; i++) {
+      const id = `ph-race-${i}`;
+      expect(phaseIds.has(id), `lost write: ${id} reported success but not in final plan`).toBe(true);
+    }
+
+    expect(fs.existsSync(file + ".lock")).toBe(false);
+    const leftovers = fs.readdirSync(path.dirname(file)).filter((n) => n.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// A3 — concurrent readers must never see a truncated/partial write (FR-PLAN-0024, FR-SHRD-0009)
+// ---------------------------------------------------------------------------
+
+describe("CLI — concurrent readers during writes (A3 / FR-PLAN-0024 / FR-SHRD-0009)", () => {
+  // Before the fix, savePlan wrote in place (fs.writeFileSync directly on the live path) and
+  // readDocWithRetry used an existsSync-then-readFileSync pair; a reader could catch the file
+  // mid-truncation or in the ENOENT gap between the two calls and get plan_file_corrupted. With
+  // tmp-file+rename writes and ENOENT-tolerant reads, a reader running concurrently with a
+  // writer must always see either the old content in full or the new content in full.
+  it("1 writer doing repeated update_status + 2 readers doing repeated next: zero plan_file_corrupted", async () => {
+    const file = planFile("writer-reader.json");
+    const phases = Array.from({ length: 20 }, (_, pi) => ({
+      id: `p${pi}`,
+      name: `Phase ${pi}`,
+      steps: Array.from({ length: 10 }, (_, si) => ({ id: `p${pi}-s${si}`, name: `Step ${si}`, prompt: "do it" })),
+    }));
+    const seed = run(["plan", "create", file, JSON.stringify({ name: "Big Plan", phases })]);
+    expect(seed.status).toBe(0);
+
+    const { spawn } = await import("child_process");
+
+    function spawnLoop(args: (i: number) => string[], count: number): Promise<{ exitCode: number; corrupted: number }> {
+      return new Promise((resolve) => {
+        let i = 0;
+        let corrupted = 0;
+        const next = (): void => {
+          if (i >= count) {
+            resolve({ exitCode: 0, corrupted });
+            return;
+          }
+          const idx = i++;
+          const child = spawn(NODE, [BIN, ...args(idx)], { stdio: "pipe" });
+          let out = "";
+          child.stdout.on("data", (d) => (out += String(d)));
+          child.on("close", () => {
+            if (out.includes("plan_file_corrupted")) corrupted++;
+            next();
+          });
+        };
+        next();
+      });
+    }
+
+    const writer = spawnLoop(
+      (i) => ["plan", "update_status", file, `p${i % 20}-s${i % 10}`, "in_progress"],
+      100,
+    );
+    const reader1 = spawnLoop(() => ["plan", "next", file], 60);
+    const reader2 = spawnLoop(() => ["plan", "next", file], 60);
+
+    const [writerResult, reader1Result, reader2Result] = await Promise.all([writer, reader1, reader2]);
+
+    expect(writerResult.corrupted).toBe(0);
+    expect(reader1Result.corrupted).toBe(0);
+    expect(reader2Result.corrupted).toBe(0);
+
+    // Final plan must still be valid JSON — no torn write left behind.
+    expect(() => JSON.parse(fs.readFileSync(file, "utf8"))).not.toThrow();
+  }, 120_000);
 });

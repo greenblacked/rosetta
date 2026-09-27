@@ -282,7 +282,7 @@ export class InteractionEngine {
     while (!this.session.hasExited && this.now() < deadline) {
       await this.sleep(this.pollMs);
     }
-    if (!this.session.hasExited) this.session.kill();
+    if (!this.session.hasExited) await this.session.kill();
   }
 
   // --- Readiness (launching → ready) -----------------------------------------
@@ -318,7 +318,6 @@ export class InteractionEngine {
     snapshot: string,
     events: TrajectoryEvent[],
   ): Promise<'answered' | 'terminate' | 'keep-waiting'> {
-    this.turnCount += 1;
     // Capture the observed reasoning effort the CLI ran at (§5.2): the Stop payload
     // reports it (claude: `effort.level`), so keep the latest non-empty value across
     // turns — this is the observed truth compared against the requested effort.
@@ -328,8 +327,13 @@ export class InteractionEngine {
     const base = this.adapter.classifyTurn(signal); // deterministic pre-gate (P4)
     // row 4 (deterministic): a `working` continuation is NOT a turn boundary — the
     // agent is still executing, so we don't close the turn (currentTurnStart holds).
+    // (C9) `turnCount` is incremented ONLY on a path that actually closes a turn
+    // (every `recordTurn` call below), never on a `working` signal — the timeline
+    // (`recordTurn`) already excludes these, and `turnCount` must agree with it,
+    // both for reporting and because `turnCount > maxTurns` can terminate a trial.
     if (base === 'working') return 'keep-waiting';
     if (base === 'done') {
+      this.turnCount += 1;
       this.recordTurn(stopAt, this.now(), false); // row 3 (deterministic)
       return 'terminate';
     }
@@ -343,6 +347,7 @@ export class InteractionEngine {
     // through to classification/answer; anything else keeps the cheap deterministic
     // done-path (preserves the no-LLM done shortcut for real completions).
     if (this.adapter.detectCompletion?.(events) && !endsWithQuestion(signal.lastAssistantMessage)) {
+      this.turnCount += 1;
       this.recordTurn(stopAt, this.now(), false); // row 3 (deterministic)
       return 'terminate';
     }
@@ -350,6 +355,7 @@ export class InteractionEngine {
     // base === 'question': a final message is present; the fast model classifies it.
     const cls = await classifyStopMessage(this.router, signal.lastAssistantMessage);
     if (cls === 'done') {
+      this.turnCount += 1;
       this.recordTurn(stopAt, this.now(), false); // row 3
       return 'terminate';
     }
@@ -360,6 +366,7 @@ export class InteractionEngine {
     const answer = await composeFreeTextAnswer(this.router, this.qnaPolicy, question, snapshot);
     this.recordQna('free-text', question, answer);
     await this.session.submitLine(answer);
+    this.turnCount += 1;
     this.recordTurn(stopAt, this.now(), true); // reply typed → next turn starts now
     return 'answered';
   }
@@ -416,6 +423,7 @@ export class InteractionEngine {
         return { action: 'answered' };
       }
       if (kind === 'finished') {
+        this.turnCount += 1; // (C9) same rule as every other recordTurn call site
         this.recordTurn(stopAt, this.now(), false);
         return { action: 'terminate' };
       }

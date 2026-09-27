@@ -42,8 +42,10 @@ describe('bundle isolation', () => {
       for (const hookFile of HOOK_FILES) {
         const bundlePath = path.join(BUNDLES_DIR, plugin, hookFile);
         for (const foreignIde of foreignIdes) {
-          test(`${hookFile} does not contain "${foreignIde}"`, () => {
-            if (!existsSync(bundlePath)) return;
+          // E1: the committed tree ships with deterministicHooks:false, so no bundle exists
+          // under `plugins/**` and this was a silent `return` — 15 tests reporting green
+          // while asserting nothing. `test.skipIf` makes that gap visible as SKIPPED.
+          test.skipIf(!existsSync(bundlePath))(`${hookFile} does not contain "${foreignIde}"`, () => {
             const content = readFileSync(bundlePath, 'utf-8');
             const hits = content.match(new RegExp(`["']${foreignIde}["']`, 'g'));
             const count = hits?.length ?? 0;

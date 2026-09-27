@@ -1,7 +1,9 @@
 from pathlib import Path
 from uuid import uuid4
 
+from rosetta_cli.commands.publish_command import PublishCommand
 from rosetta_cli.rosetta_publisher import ContentPublisher
+from rosetta_cli.services.document_data import DocumentData
 
 
 class _FakeDoc:
@@ -41,6 +43,17 @@ class _FakeClient:
                 elif operator == "is":
                     docs = [doc for doc in docs if str(doc.meta_fields.get(field, "")) == str(value)]
         return docs[:page_size]
+
+    def upload_document(self, **kwargs):
+        # Dry-run gate lives at the call site in the real client; the fake
+        # only needs to be a harmless no-op for tests that don't assert on it.
+        return None
+
+
+class _Args:
+    dry_run = True
+    force = False
+    no_parse = True
 
 
 def _write_instruction(root: Path, rel_path: str, content: str = "body\n") -> Path:
@@ -110,3 +123,51 @@ def test_publish_folder_dry_run_cleans_all_managed_domains_present_locally(tmp_p
     assert "[DRY RUN] Would delete: r2/core/agents/old.md" in output
     assert "[DRY RUN] Would delete: r2/grid/agents/old.md" in output
     assert dataset.deleted_ids == []
+
+
+# --- B2: a local read failure must not orphan-delete the server copy ----------
+
+
+def test_publish_folder_skips_orphan_cleanup_when_a_file_fails_to_read(
+    tmp_path: Path, capsys, monkeypatch
+):
+    workspace = tmp_path / "repo"
+    instructions_root = workspace / "instructions"
+    good_file = _write_instruction(instructions_root, "r2/core/skills/planning/SKILL.md")
+    bad_file = _write_instruction(instructions_root, "r2/core/agents/other.md")
+
+    # This server doc's original_path matches the unreadable local file. If
+    # orphan cleanup ran anyway, it would be deleted because it looks absent
+    # from `all_caches`.
+    dataset = _FakeDataset(
+        docs=[_server_doc("r2/core/agents/other.md", domain="core")],
+        dataset_id="aia-r2-id",
+    )
+    client = _FakeClient({"aia-r2": dataset})
+    publisher = ContentPublisher(client, str(workspace))
+
+    real_from_file = DocumentData.from_file
+
+    def _flaky_from_file(file, *args, **kwargs):
+        if Path(file) == bad_file:
+            raise PermissionError(f"cannot read {file}")
+        return real_from_file(file, *args, **kwargs)
+
+    monkeypatch.setattr(DocumentData, "from_file", staticmethod(_flaky_from_file))
+
+    results = publisher.publish_folder(str(instructions_root), dry_run=True, parse_documents=False)
+
+    output = capsys.readouterr().out
+    assert "Orphan detection skipped (1 file(s) failed to read)" in output
+    assert "Would delete" not in output
+    assert dataset.deleted_ids == []
+
+    failed = [r for r in results if not r.success]
+    assert len(failed) == 1
+    assert failed[0].file_path == str(bad_file.relative_to(workspace))
+    assert "cannot read" in failed[0].error
+
+    # The CLI's `_publish_folder` computes the process exit code purely from
+    # the returned results, so a read failure must make the command exit non-zero.
+    exit_code = PublishCommand._publish_folder(None, publisher, instructions_root, _Args())
+    assert exit_code == 1

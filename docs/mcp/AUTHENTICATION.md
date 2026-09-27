@@ -103,7 +103,7 @@ Optional env vars:
 
 | Env var                          | Purpose                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------- |
-| `ROSETTA_OAUTH_CALLBACK_PATH`    | Custom callback path (default: `/oauth/callback`)                         |
+| `ROSETTA_OAUTH_CALLBACK_PATH`    | Custom callback path (default: `/auth/callback`)                         |
 | `ROSETTA_OAUTH_REQUIRED_SCOPES`  | Scopes advertised in `.well-known` and assigned to CIMD/DCR clients       |
 | `ROSETTA_OAUTH_EXTRA_SCOPES`     | Forwarded to IdP on upstream authorize redirect (e.g. `openid email offline_access`) |
 
@@ -220,7 +220,7 @@ Optional env vars:
 | Env var                              | Purpose                                                                                      |
 | ------------------------------------ | -------------------------------------------------------------------------------------------- |
 | `ROSETTA_OAUTH_REVOCATION_ENDPOINT`  | IdP token revocation endpoint URL                                                            |
-| `ROSETTA_OAUTH_CALLBACK_PATH`        | Custom callback path (default: `/oauth/callback`)                                            |
+| `ROSETTA_OAUTH_CALLBACK_PATH`        | Custom callback path (default: `/auth/callback`)                                            |
 | `ROSETTA_OAUTH_REQUIRED_SCOPES`      | Scopes advertised in `.well-known` and assigned to CIMD/DCR clients; validated at introspection |
 | `ROSETTA_OAUTH_VALID_SCOPES`         | Explicit override for `.well-known` and DCR validation; falls back to `ROSETTA_OAUTH_REQUIRED_SCOPES` if not set |
 | `ROSETTA_OAUTH_EXTRA_SCOPES`         | Forwarded to IdP on upstream authorize redirect                                              |

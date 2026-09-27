@@ -6,7 +6,7 @@ import * as fs from "fs";
 import type { RunEnvelope } from "../../registry/types.js";
 import { ok, err } from "../../shared/envelope.js";
 import { logger } from "../../shared/logger.js";
-import { atomicWriteWithBackup } from "../../shared/doc-io.js";
+import { atomicWriteWithBackup, createDocExclusive } from "../../shared/doc-io.js";
 import {
   type Plan,
   type Phase,
@@ -21,6 +21,8 @@ import {
   propagateStatuses,
   findPhase,
   findStep,
+  normalizeStep,
+  normalizePhase,
 } from "./core.js";
 import { buildPlanWriteResult, type PlanWriteResult } from "./output.js";
 
@@ -104,11 +106,19 @@ export async function cmdUpsert(
       const depsErr = validateDependencies(plan); if (depsErr) return err(depsErr);
       const sizeErr = validateSizeLimits(plan); if (sizeErr) return err(sizeErr);
       propagateStatuses(plan);
-      // FR-PLAN-0026 — savePlan writes 2-space pretty-formatted JSON
-      savePlan(planFile, plan);
-      logger.info({ planFile, targetId: resolvedTargetId }, "upsert created new plan");
-      // FR-PLAN-0040 — return PlanWriteResult; previous_version=null on first create (FR-PLAN-0010)
-      return ok(buildPlanWriteResult(plan, null));
+
+      // A2/FR-PLAN-0024 — the existsSync check above is not itself exclusive: another process
+      // can win the same race between it and the write below. createDocExclusive takes the
+      // `.lock` mutex, re-checks for the file under the lock, and writes only if it is still
+      // missing. When it lost the race (created:false), fall through to the normal
+      // atomicWriteWithBackup path below, which now finds the file the winner just created and
+      // merges this same cleanData against it instead of silently discarding this call's patch.
+      const created = await createDocExclusive<Plan>(planFile, () => plan, savePlan);
+      if (created.created) {
+        logger.info({ planFile, targetId: resolvedTargetId }, "upsert created new plan");
+        // FR-PLAN-0040 — return PlanWriteResult; previous_version=null on first create (FR-PLAN-0010)
+        return ok(buildPlanWriteResult(plan, null));
+      }
     }
 
     // FR-PLAN-0024 — use rename-as-guard write cycle for existing plans
@@ -128,17 +138,10 @@ export async function cmdUpsert(
             const phase = plan.phases[phaseIdx]!;
             const idCheck = validateImmutableId(cleanData["id"] as string | undefined, resolvedTargetId);
             if (idCheck) return { ok: false, error: idCheck };
-            if (cleanData["steps"] !== undefined && Array.isArray(cleanData["steps"])) {
-              const patchSteps = cleanData["steps"] as Record<string, unknown>[];
-              const mergedSteps = mergeById((phase.steps ?? []) as unknown as Record<string, unknown>[], patchSteps);
-              if ("error" in mergedSteps) return { ok: false, error: mergedSteps.error };
-              const { steps: _s, ...rest } = cleanData;
-              const merged = mergePatch(phase as unknown as Record<string, unknown>, rest) as unknown as Phase;
-              merged.steps = mergedSteps as unknown as Step[];
-              mutated.phases[phaseIdx] = merged;
-            } else {
-              mutated.phases[phaseIdx] = mergePatch(phase as unknown as Record<string, unknown>, cleanData) as unknown as Phase;
-            }
+            // A4 — mergePhasePatch merges a nested `steps` array by id instead of replacing it.
+            const merged = mergePhasePatch(phase, cleanData);
+            if ("error" in merged) return { ok: false, error: merged.error };
+            mutated.phases[phaseIdx] = merged;
           } else {
             const foundStep = findStep(plan, resolvedTargetId);
             if (foundStep) {
@@ -154,11 +157,16 @@ export async function cmdUpsert(
                 if (!phaseId) return { ok: false, error: "missing_phase_id", include_help: true };
                 const parentPhase = findPhase(mutated, phaseId);
                 if (!parentPhase) return { ok: false, error: "phase_not_found" };
-                const newStep: Step = { status: "open", depends_on: [], ...(cleanData as Partial<Step>), id: resolvedTargetId } as Step;
+                // A5 — new step gets cmdCreate's defaults (status:"open", depends_on:[]).
+                const newStep = { ...normalizeStep(cleanData), id: resolvedTargetId } as Step;
                 parentPhase.steps = parentPhase.steps ?? [];
                 parentPhase.steps.push(newStep);
               } else {
-                const newPhase: Phase = { status: "open", depends_on: [], steps: [], name: resolvedTargetId, description: "", ...(cleanData as Partial<Phase>), id: resolvedTargetId } as Phase;
+                // A5 — new phase gets cmdCreate's defaults; `name` falls back to the target id
+                // only when cleanData does not supply one (normalizePhase does not default it).
+                const newPhase = normalizePhase(cleanData);
+                if (cleanData["name"] === undefined) newPhase.name = resolvedTargetId;
+                newPhase.id = resolvedTargetId;
                 mutated.phases = mutated.phases ?? [];
                 mutated.phases.push(newPhase);
               }
@@ -192,14 +200,48 @@ export async function cmdUpsert(
   }
 }
 
+// A4/FR-PLAN-0015 — merges a single phase-level patch against its existing phase: a nested
+// `steps` array is merged by id (via mergeById) rather than replacing the whole list, and any
+// newly-appended step gets create-time defaults (A5). Shared by applyEntirePlanPatch (for a
+// phase id already present in the plan) and cmdUpsert's phase-target branch, so the two code
+// paths can no longer disagree on how a nested-steps patch behaves.
+export function mergePhasePatch(phase: Phase, patch: Record<string, unknown>): Phase | { error: string } {
+  if (patch["steps"] !== undefined && Array.isArray(patch["steps"])) {
+    const patchSteps = patch["steps"] as Record<string, unknown>[];
+    const mergedSteps = mergeById((phase.steps ?? []) as unknown as Record<string, unknown>[], patchSteps);
+    if ("error" in mergedSteps) return { error: mergedSteps.error };
+    const { steps: _s, ...rest } = patch;
+    const merged = mergePatch(phase as unknown as Record<string, unknown>, rest) as unknown as Phase;
+    // A5 — normalizeStep only fills gaps, so re-applying it to already-normalized existing
+    // steps (kept by mergeById) is a harmless no-op; only the newly-appended steps actually
+    // pick up defaults here.
+    merged.steps = (mergedSteps as Record<string, unknown>[]).map((s) => normalizeStep(s));
+    return merged;
+  }
+  return mergePatch(phase as unknown as Record<string, unknown>, patch) as unknown as Phase;
+}
+
 function applyEntirePlanPatch(plan: Plan, cleanData: Record<string, unknown>): Plan {
   if (cleanData["phases"] !== undefined && Array.isArray(cleanData["phases"])) {
     const patchPhases = cleanData["phases"] as Record<string, unknown>[];
-    const mergedPhases = mergeById(plan.phases as unknown as Record<string, unknown>[], patchPhases);
-    if ("error" in mergedPhases) return mergedPhases as unknown as Plan;
+    // A4 — phases already present are merged via mergePhasePatch (steps merged by id, not
+    // replaced); a phase id with no existing match is a brand-new phase and goes through
+    // normalizePhase (A5) for create-time defaults instead of being appended raw.
+    const mergedPhases: Phase[] = [...plan.phases];
+    for (const patch of patchPhases) {
+      if (!patch["id"]) return { error: "missing_id" } as unknown as Plan;
+      const idx = mergedPhases.findIndex((p) => p["id"] === patch["id"]);
+      if (idx >= 0) {
+        const merged = mergePhasePatch(mergedPhases[idx]!, patch);
+        if ("error" in merged) return merged as unknown as Plan;
+        mergedPhases[idx] = merged;
+      } else {
+        mergedPhases.push(normalizePhase(patch));
+      }
+    }
     const { phases: _p, ...rest } = cleanData;
     const merged = mergePatch(plan as unknown as Record<string, unknown>, rest) as unknown as Plan;
-    merged.phases = mergedPhases as unknown as Phase[];
+    merged.phases = mergedPhases;
     return merged;
   }
   return mergePatch(plan as unknown as Record<string, unknown>, cleanData) as unknown as Plan;

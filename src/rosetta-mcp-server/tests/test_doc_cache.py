@@ -99,6 +99,35 @@ async def test_get_all_docs_async_raises_timeout_and_does_not_cache():
     assert cache._cache.get("ds1") is None
 
 
+def test_get_all_docs_does_not_cache_empty_list():
+    """B3: an empty result (e.g. mid-publish) must not be cached for the TTL."""
+    fake = _FakeDocumentClient(docs=[])
+    cache = InstructionDocCache(document_client=fake, ttl=300)
+    dataset = object()
+
+    assert cache.get_all_docs(dataset, "ds1") == []
+    assert fake.calls == 1
+
+    # Second call must re-fetch since nothing was cached.
+    fake._docs = ["doc1"]
+    assert cache.get_all_docs(dataset, "ds1") == ["doc1"]
+    assert fake.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_get_all_docs_async_does_not_cache_empty_list():
+    fake = _FakeDocumentClient(docs=[])
+    cache = InstructionDocCache(document_client=fake, ttl=300)
+    dataset = object()
+
+    assert await cache.get_all_docs_async(dataset, "ds1", tool_timeout=5) == []
+    assert fake.calls == 1
+
+    fake._docs = ["doc1"]
+    assert await cache.get_all_docs_async(dataset, "ds1", tool_timeout=5) == ["doc1"]
+    assert fake.calls == 2
+
+
 @pytest.mark.asyncio
 async def test_get_all_docs_async_invalidate_forces_refetch():
     fake = _FakeDocumentClient(docs=["doc1"])

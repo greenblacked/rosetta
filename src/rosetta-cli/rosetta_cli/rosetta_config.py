@@ -188,6 +188,14 @@ class RosettaConfig:
             # Auto-discovery (looks for .env)
             >>> config = RosettaConfig.from_env()
         """
+        # Explicit --env-file values must override any pre-existing shell env vars
+        # (the CLI documents --env-file as an override). --env NAME only overrides
+        # when it actually resolves to the environment-specific .env.<NAME> file;
+        # if find_env_file() falls back to a generic .env (because .env.<NAME>
+        # doesn't exist), that generic file keeps the historical, non-overriding
+        # behaviour so it can't clobber CI-exported RAGFLOW_* vars.
+        explicit = env_file is not None
+
         # Determine which file to load
         env_path: Path
         if env_file:
@@ -210,9 +218,21 @@ class RosettaConfig:
                     f"\nPlease create a .env file with RAGFLOW_BASE_URL and RAGFLOW_API_KEY"
                 )
             env_path = discovered_env_path
-        
-        # Load environment variables from file
-        load_dotenv(env_path)
+            # The --env NAME flag is "explicit" either when discovery actually found
+            # the environment-specific file (.env.<environment>), or when the file
+            # came from ROSETTA_CLI_ENV_FILE - itself an explicit user choice that
+            # find_env_file() honors ahead of any directory search. A fallback to
+            # the generic .env is indistinguishable from plain auto-discovery and
+            # must not override pre-existing shell env vars.
+            env_file_var = os.getenv(ENV_FILE_ENV_VAR)
+            if env_file_var and env_path == Path(env_file_var).expanduser():
+                explicit = True
+            elif environment is not None and env_path.name == f".env.{environment}":
+                explicit = True
+
+        # Load environment variables from file. Override pre-existing shell env
+        # vars only when the caller explicitly asked for this file/environment.
+        load_dotenv(env_path, override=explicit)
         
         return cls.from_env_vars(environment=environment)
     

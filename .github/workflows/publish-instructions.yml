@@ -39,8 +39,10 @@ on:
         default: false
         required: false
 
+# Workflow default is least-privilege; the `publish` job below grants itself
+# id-token/attestations in addition to contents:write, scoped to that job only.
 permissions:
-  contents: write  # Required for creating releases
+  contents: read
 
 concurrency:
   group: publish-instructions-main
@@ -49,6 +51,11 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write      # Required for creating releases and uploading SHA256SUMS
+      id-token: write      # Required for actions/attest-build-provenance (Sigstore OIDC)
+      attestations: write  # Required for actions/attest-build-provenance
 
     steps:
       - name: Checkout repository
@@ -199,6 +206,33 @@ jobs:
               ${{ steps.plugins.outputs.archives }}
           }
 
+      - name: Generate checksums
+        id: checksums
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        run: |
+          sha256sum instructions.zip ${{ steps.plugins.outputs.archives }} > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload checksums to the release
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.release.outputs.tag_patch }}" SHA256SUMS --clobber
+
+      # Sigstore keyless attestation over every release asset. `continue-on-error`
+      # is required: attestations are unavailable on some plan/visibility
+      # combinations (e.g. private repos on certain plans), and this step must
+      # never break the RAGFlow publish or the release itself.
+      # TODO(follow-up): SHA-pin this action (see docs/ARCHITECTURE.md#ci-release-guard);
+      # no verified SHA for it exists elsewhere in the repo yet.
+      - name: Attest build provenance
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: '*.zip'
+
       - name: Summary
         if: always()
         run: |
@@ -215,6 +249,12 @@ jobs:
             echo "- **Version:** ${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Tags:** ${{ steps.release.outputs.tag_major }}, ${{ steps.release.outputs.tag_minor }}, ${{ steps.release.outputs.tag_patch }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Release:** ${{ steps.release.outputs.release_title }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Verify a downloaded asset:**" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "sha256sum -c SHA256SUMS" >> $GITHUB_STEP_SUMMARY
+            echo "gh attestation verify <zip> --repo ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ job.status }}" == "success" ]; then

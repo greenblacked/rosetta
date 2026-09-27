@@ -298,6 +298,103 @@ const RM = firstOnLine(String.raw`\brm\b`);
 // NEGATIVES for a DROP that sits far from the `psql` token.
 const PSQL_SEGMENT = String.raw`(?:^|["'])(?:(?!\bpsql\b)[^"'])*\bpsql\b`;
 
+// ---------------------------------------------------------------------------
+// IaC / cloud / data-store patterns (F3-2).
+//
+// Fixed multi-word command sequences below use a plain `\s+` concatenation,
+// exactly like `git-reset-hard` / `chmod-777-recursive` / `mkfs` above: the
+// keyword tokens are adjacent with no unbounded `.`-window in between, so
+// there is no suffix-window concern and no scaling risk. Only patterns that
+// must find a FLAG separated from its keyword by a variable amount of other
+// arguments reuse the `firstOnLine`/cross-line treatment established above —
+// same suffix-window invariant, same failure mode if the window is ever
+// bounded (see the comments on `firstOnLine`, `AWS_S3_RM`, `KUBECTL_DELETE`).
+
+// `terraform`/`tofu apply` with `-auto-approve` or `-destroy`. The flag can
+// sit after other apply args (`-var`, `-var-file`, a saved plan file, …), so
+// this needs the unbounded `.`-window + cross-line treatment. A plain
+// `terraform apply` (interactive, no flag) intentionally does NOT match.
+const TF_APPLY_LOCAL = String.raw`\b(?:terraform|tofu)${INLINE_SPACE}+apply\b`;
+const TF_APPLY_CROSS_LINE = String.raw`\b(?:terraform|tofu)${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*apply\b`;
+const TF_APPLY = String.raw`(?:${firstOnLine(TF_APPLY_LOCAL)}|${TF_APPLY_CROSS_LINE})`;
+const TF_APPLY_UNATTENDED_RE = new RegExp(
+  TF_APPLY + String.raw`.*(?:-{1,2}auto-approve\b|-destroy\b)`);
+
+// `kubectl delete` against `--all` or a cluster/namespace-scoped resource
+// kind (`ns`/`namespace`/`pv`/`pvc`/`crd`). Extends the pre-existing
+// `kubectl-delete-prod` pattern (previously `--all` only; id kept stable —
+// see DANGEROUS_BASH below) with a resource-kind check. The resource kind
+// must NOT be immediately preceded by `-`, so a flag VALUE like
+// `--namespace=prod` is never mistaken for the positional `namespace`
+// resource kind — `kubectl delete pod x --namespace=prod` (single-pod
+// delete) must stay unflagged.
+const KUBECTL_DELETE_RESOURCE_RE = String.raw`(?<!-)\b(?:ns|namespace|pv|pvc|crd)\b`;
+const KUBECTL_DELETE_CRITICAL_RE = new RegExp(
+  KUBECTL_DELETE + String.raw`.*(?:--all\b|${KUBECTL_DELETE_RESOURCE_RE})`);
+
+// `kubectl replace --force`. Same unbounded-window treatment: `--force` can
+// follow `-f`/other flags in any order.
+const KUBECTL_REPLACE_LOCAL = String.raw`\bkubectl${INLINE_SPACE}+replace\b`;
+const KUBECTL_REPLACE_CROSS_LINE = String.raw`\bkubectl${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*replace\b`;
+const KUBECTL_REPLACE = String.raw`(?:${firstOnLine(KUBECTL_REPLACE_LOCAL)}|${KUBECTL_REPLACE_CROSS_LINE})`;
+const KUBECTL_REPLACE_FORCE_RE = new RegExp(KUBECTL_REPLACE + String.raw`.*--force\b`);
+
+// `gcloud storage rm -r` / `gsutil rm -r`. Same recursive-flag scan as
+// AWS_S3_RM: a single file/object delete (no `-r`) is left alone.
+const GCLOUD_STORAGE_RM_LOCAL = String.raw`\b(?:gcloud${INLINE_SPACE}+storage${INLINE_SPACE}+rm|gsutil${INLINE_SPACE}+rm)\b`;
+const GCLOUD_STORAGE_RM_CROSS_LINE = String.raw`(?:\bgcloud${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*storage\s+rm\b|\bgcloud${INLINE_SPACE}+storage${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*rm\b|\bgsutil${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*rm\b)`;
+const GCLOUD_STORAGE_RM = String.raw`(?:${firstOnLine(GCLOUD_STORAGE_RM_LOCAL)}|${GCLOUD_STORAGE_RM_CROSS_LINE})`;
+const GCLOUD_STORAGE_RM_RECURSIVE_RE = new RegExp(
+  GCLOUD_STORAGE_RM + String.raw`.*(?:\s|['"])(?:--recursive\b|-[rR]\b)`);
+
+// `aws s3 rb --force`. Same unbounded-window flag scan.
+const AWS_S3_RB_LOCAL = String.raw`\baws${INLINE_SPACE}+s3${INLINE_SPACE}+rb\b`;
+const AWS_S3_RB_CROSS_LINE = String.raw`(?:\baws${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*s3\s+rb\b|\baws${INLINE_SPACE}+s3${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*rb\b)`;
+const AWS_S3_RB = String.raw`(?:${firstOnLine(AWS_S3_RB_LOCAL)}|${AWS_S3_RB_CROSS_LINE})`;
+const AWS_S3_RB_FORCE_RE = new RegExp(AWS_S3_RB + String.raw`.*--force\b`);
+
+// `docker system prune -a`. Same unbounded-window flag scan; a plain
+// `docker system prune` (no `-a`/`--all`) intentionally does NOT match.
+const DOCKER_SYSTEM_PRUNE_LOCAL = String.raw`\bdocker${INLINE_SPACE}+system${INLINE_SPACE}+prune\b`;
+const DOCKER_SYSTEM_PRUNE_CROSS_LINE = String.raw`(?:\bdocker${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*system\s+prune\b|\bdocker${INLINE_SPACE}+system${INLINE_SPACE}*[${LINE_BREAK_CLASS}]\s*prune\b)`;
+const DOCKER_SYSTEM_PRUNE = String.raw`(?:${firstOnLine(DOCKER_SYSTEM_PRUNE_LOCAL)}|${DOCKER_SYSTEM_PRUNE_CROSS_LINE})`;
+const DOCKER_SYSTEM_PRUNE_ALL_RE = new RegExp(
+  DOCKER_SYSTEM_PRUNE + String.raw`.*(?:\s|['"])(?:--all\b|-a\b)`);
+
+// `redis-cli … FLUSHALL|FLUSHDB`. Host/port/auth args can precede the
+// command, so this reuses the single-token `firstOnLine` treatment (like DD).
+const REDIS_CLI = firstOnLine(String.raw`\bredis-cli\b`);
+const REDIS_FLUSH_RE = new RegExp(REDIS_CLI + String.raw`.*\bflush(?:all|db)\b`, 'i');
+
+// Fixed-sequence patterns: keyword tokens are adjacent, no window needed.
+const TF_DESTROY_RE                       = /\b(?:terraform|tofu)\s+destroy\b/;
+const TF_STATE_RM_RE                      = /\b(?:terraform|tofu)\s+state\s+rm\b/;
+const TF_WORKSPACE_DELETE_RE              = /\b(?:terraform|tofu)\s+workspace\s+delete\b/;
+const TF_FORCE_UNLOCK_RE                  = /\b(?:terraform|tofu)\s+force-unlock\b/;
+const HELM_UNINSTALL_RE                   = /\bhelm\s+(?:uninstall|delete)\b/;
+const KUBECTL_DRAIN_RE                    = /\bkubectl\s+drain\b/;
+const PULUMI_DESTROY_RE                   = /\bpulumi\s+destroy\b/;
+const PULUMI_STACK_RM_RE                  = /\bpulumi\s+stack\s+rm\b/;
+const GCLOUD_PROJECTS_DELETE_RE           = /\bgcloud\s+projects\s+delete\b/;
+const GCLOUD_SQL_INSTANCES_DELETE_RE      = /\bgcloud\s+sql\s+instances\s+delete\b/;
+const GCLOUD_CONTAINER_CLUSTERS_DELETE_RE = /\bgcloud\s+container\s+clusters\s+delete\b/;
+const GCLOUD_COMPUTE_INSTANCES_DELETE_RE  = /\bgcloud\s+compute\s+instances\s+delete\b/;
+const AWS_RDS_DELETE_RE                   = /\baws\s+rds\s+delete-db-(?:instance|cluster)\b/;
+const AWS_EC2_TERMINATE_RE                = /\baws\s+ec2\s+terminate-instances\b/;
+const AWS_CFN_DELETE_STACK_RE             = /\baws\s+cloudformation\s+delete-stack\b/;
+const AWS_EKS_DELETE_CLUSTER_RE           = /\baws\s+eks\s+delete-cluster\b/;
+const AWS_DYNAMODB_DELETE_TABLE_RE        = /\baws\s+dynamodb\s+delete-table\b/;
+const AZ_GROUP_DELETE_RE                  = /\baz\s+group\s+delete\b/;
+const AZ_AKS_DELETE_RE                    = /\baz\s+aks\s+delete\b/;
+const AZ_SQL_DB_DELETE_RE                 = /\baz\s+sql\s+db\s+delete\b/;
+// `db.dropDatabase()` / `dropDatabase()` (mongo/mongosh shell or driver call).
+// No receiver-identifier requirement, so `db.dropDatabase()` and a bare
+// `dropDatabase()` both match; the mandatory `(` immediately (mod whitespace)
+// after the name excludes an unrelated identifier like `dropDatabaseBackup()`.
+const MONGO_DROP_DATABASE_RE              = /\bdropDatabase\s*\(/i;
+const DOCKER_VOLUME_PRUNE_RE              = /\bdocker\s+volume\s+prune\b/;
+const GH_REPO_DELETE_RE                   = /\bgh\s+repo\s+delete\b/;
+
 export const DANGEROUS_BASH: readonly DangerPattern[] = [
   { id: 'rm-rf-root',          re: new RegExp(RM + RM_RF_GUARD + RM_ROOT_TARGET),                              label: 'rm -rf /',              reason: REASON.FILE_DELETION,         policy: 'reconsider' },
   { id: 'rm-rf-home',          re: new RegExp(RM + RM_RF_GUARD + RM_HOME_TARGET),                              label: 'rm -rf $HOME',          reason: REASON.FILE_DELETION,         policy: 'reconsider' },
@@ -315,12 +412,45 @@ export const DANGEROUS_BASH: readonly DangerPattern[] = [
   { id: 'git-clean-force',     re: /\bgit\s+clean\s+-[a-z]*[fd]/,                                              label: 'git clean -fd',         reason: REASON.FILE_DELETION,         policy: 'reconsider' },
   { id: 'git-branch-delete',   re: new RegExp(GIT_BRANCH + GIT_BRANCH_DELETE_LA + GIT_BRANCH_FORCE_LA),         label: 'git branch -D',         reason: REASON.GIT_HISTORY_REWRITE,   policy: 'reconsider' },
   { id: 'aws-s3-rm-recursive', re: new RegExp(AWS_S3_RM + String.raw`.*--recursive\b`),                        label: 'aws s3 rm --recursive', reason: REASON.FILE_DELETION,         policy: 'reconsider' },
-  { id: 'kubectl-delete-prod', re: new RegExp(KUBECTL_DELETE + String.raw`.*--all\b`),                          label: 'kubectl mass delete',   reason: REASON.INFRA_OPERATION,       policy: 'reconsider' },
+  // NOTE: id kept stable (was `--all`-only; F3-2 broadened it to also cover
+  // `ns`/`namespace`/`pv`/`pvc`/`crd` — see KUBECTL_DELETE_CRITICAL_RE above).
+  { id: 'kubectl-delete-prod', re: KUBECTL_DELETE_CRITICAL_RE,                                                 label: 'kubectl critical-resource delete', reason: REASON.INFRA_OPERATION, policy: 'reconsider' },
   { id: 'dropdb',              re: new RegExp(String.raw`(?:\bdropdb\b|${PSQL_SEGMENT}[^"']*\bdrop\s+(?:table|database|schema)\b)`, 'i'), label: 'DB drop CLI', reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
   { id: 'mkfs',                re: /\bmkfs(?:\.\w+)?\b/,                                                       label: 'filesystem format',     reason: REASON.DEVICE_OPERATION,      policy: 'reconsider' },
   { id: 'dd-of-dev',           re: new RegExp(DD + String.raw`.*\bof=\/dev\/`),                                label: 'dd to device',          reason: REASON.DEVICE_OPERATION,      policy: 'reconsider' },
   { id: 'chmod-777-recursive', re: /\bchmod\s+-R\s+0?777\b/,                                                   label: 'chmod -R 777',          reason: REASON.PERMISSION_CHANGE,     policy: 'reconsider' },
   { id: 'curl-pipe-shell',     re: new RegExp(CURL + String.raw`.*\s\|\s*(?:sh|bash)\b`),                      label: 'curl | sh',             reason: REASON.REMOTE_CODE_EXECUTION, policy: 'reconsider' },
+
+  // --- F3-2: IaC / cloud / data-store dangerous-action pattern pack ---
+  { id: 'terraform-destroy',            re: TF_DESTROY_RE,                  label: 'terraform/tofu destroy',            reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'terraform-apply-unattended',   re: TF_APPLY_UNATTENDED_RE,         label: 'terraform/tofu apply -auto-approve/-destroy', reason: REASON.INFRA_OPERATION, policy: 'reconsider' },
+  { id: 'terraform-state-rm',           re: TF_STATE_RM_RE,                 label: 'terraform/tofu state rm',           reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'terraform-workspace-delete',   re: TF_WORKSPACE_DELETE_RE,         label: 'terraform/tofu workspace delete',   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'terraform-force-unlock',       re: TF_FORCE_UNLOCK_RE,             label: 'terraform/tofu force-unlock',       reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'helm-uninstall',               re: HELM_UNINSTALL_RE,              label: 'helm uninstall/delete',             reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'kubectl-drain',                re: KUBECTL_DRAIN_RE,               label: 'kubectl drain',                     reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'kubectl-replace-force',        re: KUBECTL_REPLACE_FORCE_RE,       label: 'kubectl replace --force',           reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'pulumi-destroy',               re: PULUMI_DESTROY_RE,              label: 'pulumi destroy',                    reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'pulumi-stack-rm',              re: PULUMI_STACK_RM_RE,             label: 'pulumi stack rm',                   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'gcloud-projects-delete',       re: GCLOUD_PROJECTS_DELETE_RE,      label: 'gcloud projects delete',            reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'gcloud-sql-instances-delete',  re: GCLOUD_SQL_INSTANCES_DELETE_RE, label: 'gcloud sql instances delete',       reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'gcloud-container-clusters-delete', re: GCLOUD_CONTAINER_CLUSTERS_DELETE_RE, label: 'gcloud container clusters delete', reason: REASON.INFRA_OPERATION, policy: 'reconsider' },
+  { id: 'gcloud-compute-instances-delete',  re: GCLOUD_COMPUTE_INSTANCES_DELETE_RE,  label: 'gcloud compute instances delete',  reason: REASON.INFRA_OPERATION, policy: 'reconsider' },
+  { id: 'gcloud-storage-rm-recursive',  re: GCLOUD_STORAGE_RM_RECURSIVE_RE, label: 'gcloud storage/gsutil rm -r',       reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'aws-rds-delete',               re: AWS_RDS_DELETE_RE,              label: 'aws rds delete-db-instance/cluster', reason: REASON.INFRA_OPERATION,    policy: 'reconsider' },
+  { id: 'aws-ec2-terminate-instances',  re: AWS_EC2_TERMINATE_RE,           label: 'aws ec2 terminate-instances',       reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'aws-cloudformation-delete-stack', re: AWS_CFN_DELETE_STACK_RE,     label: 'aws cloudformation delete-stack',   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'aws-eks-delete-cluster',       re: AWS_EKS_DELETE_CLUSTER_RE,      label: 'aws eks delete-cluster',            reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'aws-dynamodb-delete-table',    re: AWS_DYNAMODB_DELETE_TABLE_RE,   label: 'aws dynamodb delete-table',         reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
+  { id: 'aws-s3-rb-force',              re: AWS_S3_RB_FORCE_RE,             label: 'aws s3 rb --force',                 reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'az-group-delete',              re: AZ_GROUP_DELETE_RE,             label: 'az group delete',                   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'az-aks-delete',                re: AZ_AKS_DELETE_RE,               label: 'az aks delete',                     reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'az-sql-db-delete',             re: AZ_SQL_DB_DELETE_RE,            label: 'az sql db delete',                  reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
+  { id: 'redis-flushall',               re: REDIS_FLUSH_RE,                 label: 'redis-cli FLUSHALL/FLUSHDB',        reason: REASON.DATA_MANIPULATION,   policy: 'reconsider' },
+  { id: 'mongo-drop-database',          re: MONGO_DROP_DATABASE_RE,         label: 'mongo dropDatabase()',              reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
+  { id: 'docker-system-prune-all',      re: DOCKER_SYSTEM_PRUNE_ALL_RE,     label: 'docker system prune -a',            reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'docker-volume-prune',          re: DOCKER_VOLUME_PRUNE_RE,         label: 'docker volume prune',               reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'gh-repo-delete',               re: GH_REPO_DELETE_RE,              label: 'gh repo delete',                    reason: REASON.FILE_DELETION,       policy: 'reconsider' },
 ] as const;
 
 // Irreversible key/credential files. These are NOT about secrecy (Rosetta does not
@@ -358,4 +488,38 @@ export const DANGEROUS_CONTENT: readonly DangerPattern[] = [
   { id: 'content-sql-update-no-where', re: SQL_UPDATE_NO_WHERE_RE,   label: 'UPDATE without WHERE in payload', reason: REASON.DATA_MANIPULATION,   policy: 'reconsider' },
   { id: 'content-sql-drop-index-view', re: SQL_DROP_INDEX_VIEW_RE,   label: 'DROP INDEX/VIEW in payload',      reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
   { id: 'content-sql-alter-drop-col',  re: SQL_ALTER_DROP_COLUMN_RE, label: 'ALTER DROP COLUMN in payload',    reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
+
+  // F3-2: same infra/data-store commands, caught when written into a script
+  // or CI config (e.g. a generated `.sh` or pipeline yaml) rather than run
+  // directly — reuses the exact same compiled RegExp objects as DANGEROUS_BASH.
+  { id: 'content-terraform-destroy',            re: TF_DESTROY_RE,                  label: 'terraform/tofu destroy in payload',            reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-terraform-apply-unattended',   re: TF_APPLY_UNATTENDED_RE,         label: 'terraform/tofu apply -auto-approve/-destroy in payload', reason: REASON.INFRA_OPERATION, policy: 'reconsider' },
+  { id: 'content-terraform-state-rm',           re: TF_STATE_RM_RE,                 label: 'terraform/tofu state rm in payload',           reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-terraform-workspace-delete',   re: TF_WORKSPACE_DELETE_RE,         label: 'terraform/tofu workspace delete in payload',   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-terraform-force-unlock',       re: TF_FORCE_UNLOCK_RE,             label: 'terraform/tofu force-unlock in payload',       reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-helm-uninstall',               re: HELM_UNINSTALL_RE,              label: 'helm uninstall/delete in payload',             reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-kubectl-delete-critical',      re: KUBECTL_DELETE_CRITICAL_RE,     label: 'kubectl critical-resource delete in payload',  reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-kubectl-drain',                re: KUBECTL_DRAIN_RE,               label: 'kubectl drain in payload',                     reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-kubectl-replace-force',        re: KUBECTL_REPLACE_FORCE_RE,       label: 'kubectl replace --force in payload',           reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-pulumi-destroy',               re: PULUMI_DESTROY_RE,              label: 'pulumi destroy in payload',                    reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-pulumi-stack-rm',              re: PULUMI_STACK_RM_RE,             label: 'pulumi stack rm in payload',                   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-gcloud-projects-delete',       re: GCLOUD_PROJECTS_DELETE_RE,      label: 'gcloud projects delete in payload',            reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-gcloud-sql-instances-delete',  re: GCLOUD_SQL_INSTANCES_DELETE_RE, label: 'gcloud sql instances delete in payload',       reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-gcloud-container-clusters-delete', re: GCLOUD_CONTAINER_CLUSTERS_DELETE_RE, label: 'gcloud container clusters delete in payload', reason: REASON.INFRA_OPERATION, policy: 'reconsider' },
+  { id: 'content-gcloud-compute-instances-delete',  re: GCLOUD_COMPUTE_INSTANCES_DELETE_RE,  label: 'gcloud compute instances delete in payload',  reason: REASON.INFRA_OPERATION, policy: 'reconsider' },
+  { id: 'content-gcloud-storage-rm-recursive',  re: GCLOUD_STORAGE_RM_RECURSIVE_RE, label: 'gcloud storage/gsutil rm -r in payload',       reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'content-aws-rds-delete',               re: AWS_RDS_DELETE_RE,              label: 'aws rds delete-db-instance/cluster in payload', reason: REASON.INFRA_OPERATION,    policy: 'reconsider' },
+  { id: 'content-aws-ec2-terminate-instances',  re: AWS_EC2_TERMINATE_RE,           label: 'aws ec2 terminate-instances in payload',       reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-aws-cloudformation-delete-stack', re: AWS_CFN_DELETE_STACK_RE,     label: 'aws cloudformation delete-stack in payload',   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-aws-eks-delete-cluster',       re: AWS_EKS_DELETE_CLUSTER_RE,      label: 'aws eks delete-cluster in payload',            reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-aws-dynamodb-delete-table',    re: AWS_DYNAMODB_DELETE_TABLE_RE,   label: 'aws dynamodb delete-table in payload',         reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
+  { id: 'content-aws-s3-rb-force',              re: AWS_S3_RB_FORCE_RE,             label: 'aws s3 rb --force in payload',                 reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'content-az-group-delete',              re: AZ_GROUP_DELETE_RE,             label: 'az group delete in payload',                   reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-az-aks-delete',                re: AZ_AKS_DELETE_RE,               label: 'az aks delete in payload',                     reason: REASON.INFRA_OPERATION,     policy: 'reconsider' },
+  { id: 'content-az-sql-db-delete',             re: AZ_SQL_DB_DELETE_RE,            label: 'az sql db delete in payload',                  reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
+  { id: 'content-redis-flushall',               re: REDIS_FLUSH_RE,                 label: 'redis-cli FLUSHALL/FLUSHDB in payload',        reason: REASON.DATA_MANIPULATION,   policy: 'reconsider' },
+  { id: 'content-mongo-drop-database',          re: MONGO_DROP_DATABASE_RE,         label: 'mongo dropDatabase() in payload',              reason: REASON.SCHEMA_MODIFICATION, policy: 'reconsider' },
+  { id: 'content-docker-system-prune-all',      re: DOCKER_SYSTEM_PRUNE_ALL_RE,     label: 'docker system prune -a in payload',            reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'content-docker-volume-prune',          re: DOCKER_VOLUME_PRUNE_RE,         label: 'docker volume prune in payload',               reason: REASON.FILE_DELETION,       policy: 'reconsider' },
+  { id: 'content-gh-repo-delete',               re: GH_REPO_DELETE_RE,              label: 'gh repo delete in payload',                    reason: REASON.FILE_DELETION,       policy: 'reconsider' },
 ] as const;

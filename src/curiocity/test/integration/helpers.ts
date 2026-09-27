@@ -13,8 +13,20 @@ export function scenePath(name: string): string {
   return join(REPO, 'test/fixtures/mock-agent/scenes', name);
 }
 
+// E5: every `curio-test-run-*` dir this helper mints (across every test file that
+// imports it — vitest gives each test file its own module instance) is tracked here
+// so the file can remove them all in a single `afterAll(cleanupTmpRunDirs)`.
+const createdRunDirs: string[] = [];
+
 export function tmpRunDir(): string {
-  return mkdtempSync(join(tmpdir(), 'curio-test-run-'));
+  const dir = mkdtempSync(join(tmpdir(), 'curio-test-run-'));
+  createdRunDirs.push(dir);
+  return dir;
+}
+
+/** Remove every `curio-test-run-*` dir `tmpRunDir()` minted in this test file (E5). */
+export function cleanupTmpRunDirs(): void {
+  for (const d of createdRunDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 }
 
 /**

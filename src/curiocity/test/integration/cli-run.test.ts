@@ -1,11 +1,24 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import { runRun } from '../../src/cli/commands/run';
 import { loadRun } from '../../src/results/loader';
 import { ExitCode } from '../../src/cli/exit-codes';
 import { mockProfile, REPO } from './helpers';
+
+// E5: this file's own `curio-cli-*` work dirs (not the workspace/ctrl dirs `runRun`
+// itself already tears down per §7) must not leak into /tmp across a full run.
+const createdWorkDirs: string[] = [];
+afterAll(() => {
+  for (const d of createdWorkDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function tmpWorkDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  createdWorkDirs.push(dir);
+  return dir;
+}
 
 function readdirRuns(out: string): string[] {
   return readdirSync(out)
@@ -43,7 +56,7 @@ function writeCase(sourceDir: string, name: string): void {
 
 describe('cli run (end-to-end, mock agent)', () => {
   it('run --source produces a §14 results dir and exits 0', async () => {
-    const work = mkdtempSync(join(tmpdir(), 'curio-cli-'));
+    const work = tmpWorkDir('curio-cli-');
     const config = writeConfig(work);
     const source = join(work, 'cases');
     mkdirSync(source);
@@ -66,7 +79,7 @@ describe('cli run (end-to-end, mock agent)', () => {
   });
 
   it('run --prompt (inline) produces a §14 results dir and exits 0', async () => {
-    const work = mkdtempSync(join(tmpdir(), 'curio-cli-inline-'));
+    const work = tmpWorkDir('curio-cli-inline-');
     const config = writeConfig(work);
     const out = join(work, 'results');
 
@@ -86,7 +99,7 @@ describe('cli run (end-to-end, mock agent)', () => {
   });
 
   it('run --source with no runnable cases → exit 2 (no trials)', async () => {
-    const work = mkdtempSync(join(tmpdir(), 'curio-cli-empty-'));
+    const work = tmpWorkDir('curio-cli-empty-');
     const config = writeConfig(work);
     const source = join(work, 'cases');
     mkdirSync(source);

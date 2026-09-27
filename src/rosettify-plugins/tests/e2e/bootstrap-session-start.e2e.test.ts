@@ -126,7 +126,8 @@ describe('Bootstrap SessionStart real-instruction counts (FR-HOOK-0007)', () => 
       const entries = loadEntries(outR2);
       expect(entries.length, 'core-claude r2 SessionStart entry count').toBe(9);
       const last = entries.at(-1)!;
-      expect(last.once).toBe(true);
+      // D1: no "once" — SessionStart must re-fire on clear/compact, not just startup.
+      expect(last.once).toBeUndefined();
       expect(last.command).toContain('CLAUDE_PLUGIN_ROOT');
       expect(last.command).toContain('Rosetta Plugin Path:');
     });
@@ -135,7 +136,8 @@ describe('Bootstrap SessionStart real-instruction counts (FR-HOOK-0007)', () => 
       const entries = loadEntries(outR3);
       expect(entries.length, 'core-claude r3 SessionStart entry count').toBe(5);
       const last = entries.at(-1)!;
-      expect(last.once).toBe(true);
+      // D1: no "once" — SessionStart must re-fire on clear/compact, not just startup.
+      expect(last.once).toBeUndefined();
       expect(last.command).toContain('CLAUDE_PLUGIN_ROOT');
       expect(last.command).toContain('Rosetta Plugin Path:');
     });

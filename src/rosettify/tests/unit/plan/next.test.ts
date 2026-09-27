@@ -193,16 +193,133 @@ describe("cmdNext — status grouping", () => {
 });
 
 // ---------------------------------------------------------------------------
+// R9 — active phase is chosen by array order alone, never skipped for unmet phase deps
+// ---------------------------------------------------------------------------
+
+describe("cmdNext — R9 sequential active-phase selection", () => {
+  // Reopened-earlier-dependency case: p1 is first in array order and incomplete, but its own
+  // phase-level depends_on (on "p0") is unmet. Before the fix, cmdNext skipped p1 entirely and
+  // treated p2 as active — hiding p1's in_progress step and breaking sequential ordering.
+  it("does not skip an earlier incomplete phase whose own deps are unmet; reports its in_progress step but not its unready open step", async () => {
+    const plan: Plan = {
+      name: "Reopened Dependency Plan",
+      description: "",
+      status: "open",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      previous_version: null,
+      phases: [
+        {
+          id: "p1",
+          name: "Phase 1",
+          description: "",
+          status: "open",
+          depends_on: ["p0"], // unmet — "p0" is not complete (not even present)
+          steps: [
+            { id: "s1-ip", name: "In Progress", prompt: "p", status: "in_progress", depends_on: [] },
+            { id: "s1-open", name: "Open", prompt: "p", status: "open", depends_on: [] },
+          ],
+        },
+        {
+          id: "p2",
+          name: "Phase 2",
+          description: "",
+          status: "open",
+          depends_on: [],
+          steps: [
+            { id: "s2-open", name: "Open", prompt: "p", status: "open", depends_on: [] },
+          ],
+        },
+      ],
+    };
+    const file = writePlan(plan);
+    const result = await cmdNext(file, undefined, 10);
+    expect(result.ok).toBe(true);
+    const ids = result.result!.next.map((s) => s.id);
+
+    // p1 remains the active phase (array order) — its in_progress step is always reported.
+    expect(ids).toContain("s1-ip");
+    // p1's open step can't run yet (p1's own phase-level deps unmet) — it is simply not
+    // returned (not actionable, and not genuinely `blocked`-status either).
+    expect(ids).not.toContain("s1-open");
+    // p2 must NOT be scanned at all — sequential ordering is enforced by array position.
+    expect(ids).not.toContain("s2-open");
+  });
+
+  // Out-of-order phases: p1 (first in array) depends on p2 (later in array), while p2 itself has
+  // no unmet deps. Array order — not dependency readiness — must decide the active phase.
+  it("keeps strict array order for the active phase even when a later phase's own deps are already satisfied", async () => {
+    const plan: Plan = {
+      name: "Out Of Order Plan",
+      description: "",
+      status: "open",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      previous_version: null,
+      phases: [
+        {
+          id: "p1",
+          name: "Phase 1",
+          description: "",
+          status: "open",
+          depends_on: ["p2"], // unmet — p2 not complete
+          steps: [
+            { id: "s1-open", name: "Open", prompt: "p", status: "open", depends_on: [] },
+          ],
+        },
+        {
+          id: "p2",
+          name: "Phase 2",
+          description: "",
+          status: "open",
+          depends_on: [],
+          steps: [
+            { id: "s2-open", name: "Open", prompt: "p", status: "open", depends_on: [] },
+          ],
+        },
+      ],
+    };
+    const file = writePlan(plan);
+    const result = await cmdNext(file, undefined, 10);
+    expect(result.ok).toBe(true);
+    const ids = result.result!.next.map((s) => s.id);
+    // p1 is active (first in array); its open step can't run (p1's own deps unmet) and is
+    // simply not returned.
+    expect(ids).not.toContain("s1-open");
+    // p2 is never scanned even though its own deps are satisfied — array order wins.
+    expect(ids).not.toContain("s2-open");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // target_id scoping
 // ---------------------------------------------------------------------------
 
 describe("cmdNext — target_id scoping", () => {
-  it("scopes to specified phase regardless of phase-1 state", async () => {
+  // A6/FR-PLAN-0004/FR-PLAN-0011 — target_id scopes the *step* listing to one phase, but it
+  // must not bypass that phase's own depends_on: p2 depends_on ["p1"], and p1 is not complete
+  // (its status field is literally "open" here, independent of its steps' own statuses), so a
+  // target_id=p2 request must return no steps even though s3's step-level dep on s1 is satisfied.
+  it("does not bypass the targeted phase's own depends_on (phase not complete)", async () => {
     const plan = fullPlan();
-    // Phase 2 is not yet unblocked (phase 1 incomplete), but target_id bypasses sequential check
-    // First mark s1 complete so s3's step dep is satisfied
     plan.phases[0]!.steps[0]!.status = "complete";
-    // Phase 1 still not complete (s2 is open)
+    // plan.phases[0]! ("p1") keeps its fixture default status of "open".
+    const file = writePlan(plan);
+    const result = await cmdNext(file, "p2");
+    expect(result.ok).toBe(true);
+    const ids = result.result!.next.map((s) => s.id);
+    expect(ids).not.toContain("s3");
+    expect(ids).not.toContain("s1");
+    expect(ids).not.toContain("s2");
+  });
+
+  // Counterpart: once p1 (the depended-on phase) is complete, target_id=p2 does return p2's
+  // ready steps, still excluding p1's own steps from the result (scoping still applies).
+  it("scopes to specified phase once that phase's own depends_on are satisfied", async () => {
+    const plan = fullPlan();
+    plan.phases[0]!.steps[0]!.status = "complete";
+    plan.phases[0]!.steps[1]!.status = "complete";
+    plan.phases[0]!.status = "complete"; // p1 fully complete — p2's phase dep now satisfied
     const file = writePlan(plan);
     const result = await cmdNext(file, "p2");
     expect(result.ok).toBe(true);

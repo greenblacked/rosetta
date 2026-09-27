@@ -15,6 +15,7 @@ import {
   type Step,
   type Status,
   buildStepStatusMap,
+  buildPhaseStatusMap,
   depsSatisfied,
 } from "./core.js";
 
@@ -56,18 +57,28 @@ export async function cmdNext(
     }
 
     const stepStatusMap = buildStepStatusMap(plan);
+    // A6/FR-PLAN-0004/FR-PLAN-0011 — a step's own depends_on is not the whole story: its parent
+    // phase's depends_on must also be satisfied before the step is "ready".
+    const phaseStatusMap = buildPhaseStatusMap(plan);
 
     // Determine which phase(s) to source work from.
-    // With target_id: use that specific phase (already validated above).
-    // Without target_id: find the active phase — the first phase (in array
-    // order) that is not yet fully complete (sequential enforcement).
+    // With target_id: use that specific phase (already validated above); its own depends_on is
+    // still enforced per-step below, so a targeted phase whose deps are unmet yields no open steps.
+    // Without target_id: find the active phase — the first phase (in array order) that is not
+    // yet fully complete (FR-PLAN-0011 "the active phase is the earliest phase that is not yet
+    // fully complete"). R9 — the active phase is chosen by array order alone: it must NOT skip
+    // ahead to a later phase merely because an earlier incomplete phase's own depends_on are
+    // unmet. Skipping would break sequential enforcement (a later phase's steps could appear in
+    // `next` before an earlier phase finishes) and would hide the earlier phase's in_progress
+    // steps (interrupted work the caller must still see). The earlier phase's open steps that
+    // are held back solely by its unmet phase-level depends_on are simply not returned (see
+    // below) — they are neither actionable nor genuinely `blocked`-status, and the flat `next`
+    // array has no group label to tell a caller the difference.
     let phasesToScan: Phase[];
     if (targetId) {
       phasesToScan = plan.phases.filter((p) => p.id === targetId);
     } else {
-      const activePhase = plan.phases.find(
-        (p) => (p.status ?? "open") !== "complete",
-      );
+      const activePhase = plan.phases.find((p) => (p.status ?? "open") !== "complete");
       phasesToScan = activePhase ? [activePhase] : [];
     }
 
@@ -83,9 +94,19 @@ export async function cmdNext(
         if (st === "in_progress") {
           inProgress.push(buildNextStep(step, phase));
         } else if (st === "open") {
-          if (depsSatisfied(step, stepStatusMap)) {
+          // A6 — ready requires both the step's own deps AND its phase's deps to be satisfied.
+          const stepDepsOk = depsSatisfied(step, stepStatusMap);
+          const phaseDepsOk = depsSatisfied(phase, phaseStatusMap);
+          if (stepDepsOk && phaseDepsOk) {
             openReady.push(buildNextStep(step, phase));
           }
+          // else: held back solely by an unmet step-level or phase-level dependency — simply
+          // not returned. Previously these were surfaced in the `blocked` group, but the flat
+          // `next` array carries no group labels, so callers could not distinguish them from
+          // genuinely `blocked`-status steps and treated them as actionable. The step's own
+          // `status` on disk is untouched ("open"); it is just excluded from this response.
+          // in_progress steps of the active phase (above) are still always reported, so
+          // interrupted work remains visible even while the phase's own deps are unmet.
         } else if (st === "blocked") {
           blocked.push(buildNextStep(step, phase));
         } else if (st === "failed") {

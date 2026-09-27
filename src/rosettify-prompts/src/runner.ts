@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { APIConnectionError, APIConnectionTimeoutError, APIError } from '@anthropic-ai/sdk';
 import type {
   BenchConfig,
   EvalAssertionConfig,
@@ -13,7 +14,18 @@ import type {
 import { computeCostUsd } from './pricing.js';
 import { renderDataBlock } from './delimiters.js';
 
-const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
+const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+/** `error.type` values the SDK attaches to a status-less APIError it throws for a mid-stream SSE
+ * `error` event (see @anthropic-ai/sdk core/streaming.ts: `new APIError(undefined, body, ...,
+ * type)`). These mirror server-side/transient failures and should be retried like their HTTP-status
+ * equivalents; anything else status-less (e.g. the SDK's own pre-flight "Streaming is required"
+ * error, or invalid_request_error) is a client-side/non-transient failure and must not be retried. */
+const RETRYABLE_STREAM_ERROR_TYPES = new Set([
+  'overloaded_error',
+  'api_error',
+  'rate_limit_error',
+  'timeout_error',
+]);
 /** Retry a transient API failure up to this many times (exponential backoff) before giving up. */
 const MAX_RETRIES = 3;
 
@@ -73,7 +85,14 @@ async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promis
     } catch (err) {
       attempt++;
       const status = (err as { status?: number } | undefined)?.status;
-      if (attempt > retries || (status !== undefined && !RETRYABLE_STATUS.has(status))) {
+      const isRetryableStreamError =
+        err instanceof APIError && err.status === undefined && !!err.type && RETRYABLE_STREAM_ERROR_TYPES.has(err.type);
+      const isRetryable =
+        (status !== undefined && RETRYABLE_STATUS.has(status)) ||
+        err instanceof APIConnectionError ||
+        err instanceof APIConnectionTimeoutError ||
+        isRetryableStreamError;
+      if (attempt > retries || !isRetryable) {
         throw err;
       }
       const backoffMs = Math.min(1000 * 2 ** attempt, 15_000) + Math.random() * 250;
@@ -225,14 +244,16 @@ async function runIndividualEval(
     try {
       const response = await limit(() =>
         withRetry(() =>
-          client.messages.create({
-            model,
-            max_tokens: 2048,
-            // Judges score, they don't deliberate — disabling thinking keeps the JSON verdict
-            // deterministic and leaves the whole token budget for the output (no truncation).
-            thinking: { type: 'disabled' },
-            messages: [{ role: 'user', content: buildEvalPrompt(assertion, suite.eval?.judgePrompt, turns) }],
-          }),
+          client.messages
+            .stream({
+              model,
+              max_tokens: 2048,
+              // Judges score, they don't deliberate — disabling thinking keeps the JSON verdict
+              // deterministic and leaves the whole token budget for the output (no truncation).
+              thinking: { type: 'disabled' },
+              messages: [{ role: 'user', content: buildEvalPrompt(assertion, suite.eval?.judgePrompt, turns) }],
+            })
+            .finalMessage(),
         ),
       );
       results.push(validateEvalResultItem(extractJsonObject(extractText(response))));
@@ -312,21 +333,23 @@ async function runCombinedEval(
       // as individual mode.
       const response = await limit(() =>
         withRetry(() =>
-          client.messages.create({
-            model,
-            max_tokens: 2048 + candidates.length * 1024,
-            thinking: { type: 'disabled' },
-            messages: [
-              {
-                role: 'user',
-                content: buildCombinedEvalPrompt(
-                  assertion,
-                  suite.eval?.judgePrompt,
-                  candidates.map((c) => ({ variantId: c.variantId, finalText: c.turns[c.turns.length - 1]?.assistantText ?? '' })),
-                ),
-              },
-            ],
-          }),
+          client.messages
+            .stream({
+              model,
+              max_tokens: 2048 + candidates.length * 1024,
+              thinking: { type: 'disabled' },
+              messages: [
+                {
+                  role: 'user',
+                  content: buildCombinedEvalPrompt(
+                    assertion,
+                    suite.eval?.judgePrompt,
+                    candidates.map((c) => ({ variantId: c.variantId, finalText: c.turns[c.turns.length - 1]?.assistantText ?? '' })),
+                  ),
+                },
+              ],
+            })
+            .finalMessage(),
         ),
       );
       // Accept either the requested {"scores":[...]} envelope or a bare top-level array, which
@@ -401,16 +424,18 @@ async function runVariantConversation(
 
       const start = Date.now();
       const response = await withRetry(() =>
-        client.messages.create({
-          model,
-          max_tokens: maxTokens,
-          ...(thinkingParam ? { thinking: thinkingParam } : {}),
-          ...(thinking.enabled && thinking.mode === 'adaptive'
-            ? { output_config: { effort: thinking.effort } }
-            : {}),
-          ...(system ? { system } : {}),
-          messages: history,
-        }),
+        client.messages
+          .stream({
+            model,
+            max_tokens: maxTokens,
+            ...(thinkingParam ? { thinking: thinkingParam } : {}),
+            ...(thinking.enabled && thinking.mode === 'adaptive'
+              ? { output_config: { effort: thinking.effort } }
+              : {}),
+            ...(system ? { system } : {}),
+            messages: history,
+          })
+          .finalMessage(),
       );
       const latencyMs = Date.now() - start;
 

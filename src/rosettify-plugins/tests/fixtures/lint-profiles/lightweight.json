@@ -1,0 +1,6 @@
+{
+  "destinationSuffix": "-light",
+  "pluginNameSuffix": " (Light)",
+  "pluginDescriptionSuffix": " Lightweight build.",
+  "modelOverrides": {}
+}

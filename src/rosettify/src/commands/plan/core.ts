@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import * as path from "path";
 import type { CommandInput } from "../../registry/types.js";
 import {
   PLAN_MAX_PHASES,
@@ -9,6 +8,7 @@ import {
   PLAN_MAX_NAME_LENGTH,
 } from "../../shared/constants.js";
 import { detectCycle } from "../../shared/graph.js";
+import { writeDocAtomic } from "../../shared/doc-io.js";
 
 // FR-SPECS-0005 — detectCycle lifted to shared/graph.ts (generic DFS cycle detector) so both
 // `plan` and `specs` import from `shared/` instead of one command importing from another.
@@ -270,10 +270,31 @@ export function findStep(
   id: string,
 ): { phase: Phase; step: Step } | undefined {
   for (const phase of plan.phases) {
-    const step = phase.steps.find((s) => s.id === id);
+    // A5/FR-PLAN-0015 — a phase merged in without a `steps` array (e.g. one appended by an
+    // entire_plan patch before defaults were applied) must not crash lookups; `?? []` makes
+    // this tolerant of that shape instead of throwing "Cannot read properties of undefined".
+    const step = (phase.steps ?? []).find((s) => s.id === id);
     if (step) return { phase, step };
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Defaulting (A5 / FR-PLAN-0001, FR-PLAN-0015(1)) — the same create-time defaults `cmdCreate`
+// applies, reused wherever a phase or step is appended outside of `plan create` (upsert's
+// entire_plan patch and phase-target step merges). Both functions only fill gaps: a field
+// already present on `raw` always wins, so re-applying them to an already-normalized item is a
+// harmless no-op.
+// ---------------------------------------------------------------------------
+
+export function normalizeStep(raw: Record<string, unknown>): Step {
+  return { status: "open", depends_on: [], ...raw } as unknown as Step;
+}
+
+export function normalizePhase(raw: Record<string, unknown>): Phase {
+  const rawSteps = Array.isArray(raw["steps"]) ? (raw["steps"] as Record<string, unknown>[]) : [];
+  const steps = rawSteps.map((s) => normalizeStep(s));
+  return { status: "open", depends_on: [], description: "", ...raw, steps } as unknown as Phase;
 }
 
 export function buildStepStatusMap(plan: Plan): Map<string, Status> {
@@ -342,11 +363,18 @@ export function validateUniqueIds(plan: Plan): string | null {
 }
 
 export function validateDependencies(plan: Plan): string | null {
-  const allIds = new Set<string>();
+  // A7/FR-PLAN-0001/FR-PLAN-0004 — phase and step ids live in separate namespaces: a phase's
+  // depends_on may only reference other phase ids, and a step's depends_on may only reference
+  // other step ids. A single combined id set previously let a step depend on a phase id (or vice
+  // versa); such a dependency can never be satisfied (buildPhaseStatusMap/buildStepStatusMap
+  // never populate the other kind's id), silently deadlocking `next` forever instead of being
+  // rejected up front as unknown_dependency.
+  const phaseIds = new Set<string>();
+  const stepIds = new Set<string>();
   for (const phase of plan.phases ?? []) {
-    if (phase.id) allIds.add(phase.id);
+    if (phase.id) phaseIds.add(phase.id);
     for (const step of phase.steps ?? []) {
-      if (step.id) allIds.add(step.id);
+      if (step.id) stepIds.add(step.id);
     }
   }
 
@@ -356,7 +384,7 @@ export function validateDependencies(plan: Plan): string | null {
     if (!phase.id) continue;
     phaseGraph.set(phase.id, []);
     for (const dep of phase.depends_on ?? []) {
-      if (!allIds.has(dep)) return "unknown_dependency";
+      if (!phaseIds.has(dep)) return "unknown_dependency";
       phaseGraph.get(phase.id)!.push(dep);
     }
   }
@@ -371,7 +399,7 @@ export function validateDependencies(plan: Plan): string | null {
       if (!step.id) continue;
       stepGraph.set(step.id, []);
       for (const dep of step.depends_on ?? []) {
-        if (!allIds.has(dep)) return "unknown_dependency";
+        if (!stepIds.has(dep)) return "unknown_dependency";
         stepGraph.get(step.id)!.push(dep);
       }
     }
@@ -447,8 +475,8 @@ export function loadPlan(file: string): Plan | null {
 }
 
 export function savePlan(file: string, plan: Plan): void {
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true });
   plan.updated_at = new Date().toISOString();
-  fs.writeFileSync(file, JSON.stringify(plan, null, 2));
+  // A3/FR-PLAN-0024 — write via tmp-file + rename so a concurrent reader never observes a
+  // partially-written or truncated plan file (writeDocAtomic also creates the parent dir).
+  writeDocAtomic(file, JSON.stringify(plan, null, 2));
 }

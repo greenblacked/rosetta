@@ -8,6 +8,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { initLogger } from './logging.js';
 import { generate } from './generate.js';
+import { runLint, LintUsageError } from './lint/lint.js';
+import { formatFindingsJson, formatFindingsText, isLintFormat } from './lint/format.js';
 import type { GenerateOptions, ResolvedSources } from './types.js';
 
 // FR-CLI-0012: explicit boolean only; anything else is a usage error (exit ≠ 0)
@@ -53,7 +55,9 @@ program
   .option('--profileSource <dir>', 'Override profile source directory (default: <source>/src/rosettify-plugins/profiles)')
   .option('--deterministic-hooks <bool>', 'Override the deterministic_hooks value (true|false); default: false regardless of release', parseBooleanArg)
   .option('--dry-run', 'Print what would be written, but do not write', false)
-  .option('--verbose', 'Enable verbose logging', false);
+  .option('--verbose', 'Enable verbose logging', false)
+  .option('--lint', 'Lint mode: report deterministic instruction-quality findings and write nothing (FR-CLI-0070); exit 0 clean, 1 findings, 2 usage error', false)
+  .option('--lint-format <fmt>', 'Lint output format: "text" (default) or "json" (FR-CLI-0074)', 'text');
 
 program.addHelpText('after', `
 Source model:
@@ -116,6 +120,24 @@ Processor catalog:
 Spec model:
   Each target is a PluginSpec with specEntries, pluginProcessors, etc.
   See src/spec/targets.ts for the seven built-in targets.
+
+Lint mode (--lint, --lint-format):
+  --lint                 Resolve the instruction source for --release/--domain/--profile through
+                          the same VFS and content-loading path a build uses, run every
+                          deterministic lint rule against it, and write no plugin output.
+  --lint-format <fmt>    "text" (default): one "file:line: [rule] message" line per finding.
+                          "json": a single JSON array of {rule, severity, file, line, message}.
+
+  Rules: alias-target-exists (every typed command alias — USE/READ SKILL, USE/READ FLOW,
+  APPLY PHASE, INVOKE/READ SUBAGENT, READ/APPLY RULE, READ TEMPLATE, READ CONFIGURE,
+  READ/APPLY SKILL FILE — must resolve, except an allowlisted external reference
+  (src/lint/external-refs.ts) or an obvious placeholder), unique-document-name and
+  name-matches-filename (frontmatter name unique per instruction type, matching its own
+  filename/directory), known-model-token (every agent model: candidate recognized by
+  src/spec/model-maps.ts or the active profile's modelOverrides).
+
+  Exit status: 0 clean, 1 one or more findings, 2 usage error (unknown release/domain/profile,
+  or an unrecognized --lint-format value) — no rule is evaluated on a usage error.
 `);
 
 async function main(): Promise<void> {
@@ -136,6 +158,39 @@ async function main(): Promise<void> {
   };
 
   initLogger(verbose);
+
+  // FR-CLI-0070/0074: --lint takes over the run entirely — no generation, no output written.
+  if (opts.lint as boolean) {
+    const lintFormat = opts.lintFormat as string;
+    if (!isLintFormat(lintFormat)) {
+      process.stderr.write(`Unknown --lint-format "${lintFormat}". Expected "text" or "json".\n`);
+      process.exit(2);
+    }
+
+    try {
+      const { findings } = runLint({
+        sources,
+        release: opts.release as string,
+        domain: opts.domain as string,
+        profile: opts.profile as string | undefined,
+      });
+
+      if (lintFormat === 'json') {
+        process.stdout.write(`${formatFindingsJson(findings)}\n`);
+      } else if (findings.length > 0) {
+        process.stdout.write(`${formatFindingsText(findings)}\n`);
+      }
+
+      process.exit(findings.length > 0 ? 1 : 0);
+    } catch (err) {
+      if (err instanceof LintUsageError) {
+        process.stderr.write(`${err.message}\n`);
+        process.exit(2);
+      }
+      throw err;
+    }
+    return;
+  }
 
   const options: GenerateOptions = {
     sources,

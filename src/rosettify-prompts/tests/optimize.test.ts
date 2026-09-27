@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import {
   COMMON_CONTEXT,
   OPTIMIZE_INVARIANT,
@@ -116,6 +116,13 @@ function fakeAsker(answersById: Record<string, string>, log: AskInvocation[]): O
   };
 }
 
+// E5: every mkdtemp'd workspace is tracked here and removed in the module-level
+// afterAll below, so this suite leaks no directories into /tmp.
+const createdDirs: string[] = [];
+afterAll(async () => {
+  await Promise.all(createdDirs.map((d) => rm(d, { recursive: true, force: true })));
+});
+
 async function tempWorkspace(): Promise<{
   dir: string;
   outDir: string;
@@ -124,6 +131,7 @@ async function tempWorkspace(): Promise<{
   supporting: string;
 }> {
   const dir = await mkdtemp(path.join(tmpdir(), 'rosettify-prompts-optimize-test-'));
+  createdDirs.push(dir);
   const refs = path.join(dir, 'references');
   const assets = path.join(dir, 'assets');
   await mkdir(refs, { recursive: true });

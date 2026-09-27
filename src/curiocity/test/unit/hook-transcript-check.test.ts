@@ -1,9 +1,9 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import {
   hookTranscriptCheck,
   eventToSubtype,
@@ -23,9 +23,20 @@ import { ConfigError } from '../../src/shared/errors';
 const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/hook-transcript/', import.meta.url));
 const HOOKS_JSON = join(FIXTURES_DIR, 'hooks.json');
 
+// E5: every mkdtemp'd workspace `ctx()` mints below is tracked here and removed afterward.
+const createdDirs: string[] = [];
+afterAll(() => {
+  for (const d of createdDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function ctx(over: Partial<EvalContext> = {}): EvalContext {
+  let workspace = over.workspace;
+  if (workspace === undefined) {
+    workspace = mkdtempSync(join(tmpdir(), 'curio-hook-ws-'));
+    createdDirs.push(workspace);
+  }
   return {
-    workspace: over.workspace ?? mkdtempSync(join(tmpdir(), 'curio-hook-ws-')),
+    workspace,
     workspaceDiff: over.workspaceDiff ?? '',
     events: over.events ?? [],
     qnaLog: over.qnaLog ?? [],

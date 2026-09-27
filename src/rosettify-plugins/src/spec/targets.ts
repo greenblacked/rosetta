@@ -76,6 +76,16 @@ const WORKFLOW_GLOB_TO_SKILLS_FLOW_LITERAL_PAIR: readonly [string, string] = [
   'WORKFLOW/COMMAND `skills/*-flow/SKILL.md`',
 ];
 
+// D6: same rationale as the pair above, but for Codex's AGENT/SUBAGENT noun. Codex's `agents/**`
+// SpecEntry restructures each agent doc to `.codex/agents/<name>.toml` (outside `.agents/`, the
+// Plugin Path the root hook reports) — a bare `agents/` rename pair would still be wrong, since the
+// glob-doc string in plugin-files-mode.md must resolve relative to the reported Plugin Path.
+// Codex-only: Antigravity keeps real `agents/*.md` files under its plugin root untouched.
+const AGENT_GLOB_TO_CODEX_AGENTS_LITERAL_PAIR: readonly [string, string] = [
+  'AGENT/SUBAGENT `agents/*.md`',
+  'AGENT/SUBAGENT `../.codex/agents/*.toml`',
+];
+
 // Base processors shared across all text file entries
 const BASE_PROCESSORS = [fileRead, fileApplyOverrides, fileBundle];
 
@@ -420,10 +430,15 @@ export function buildAllSpecs(ctx: SpecBuildContext): PluginSpec[] {
       // FR-ARCH-0058: workflows->skills restructures document paths, so FR-ARCH-0049 emits no
       // folder-level pair for it; this corrects the plugin-files-mode.md glob-doc string. Runs
       // before the bootstrap assembler, so the hooks payload inherits the correction.
+      // D6: same correction for the AGENT/SUBAGENT noun, whose real files land outside the
+      // reported Plugin Path (`.codex/agents/*.toml`, not `.agents/agents/*.md`).
       // FR-COPY-0083: always-on subagent_required_model list normalization, same late slot as
       // the Antigravity sibling (after index generation).
       [
-        pluginReplaceLiterals([WORKFLOW_GLOB_TO_SKILLS_FLOW_LITERAL_PAIR]),
+        pluginReplaceLiterals([
+          WORKFLOW_GLOB_TO_SKILLS_FLOW_LITERAL_PAIR,
+          AGENT_GLOB_TO_CODEX_AGENTS_LITERAL_PAIR,
+        ]),
         pluginNormalizeSubagentRequiredModel(codexSubagentModelTokenMapper),
       ],
       manifestSuffix,

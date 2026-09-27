@@ -42,7 +42,12 @@ on:
         default: codex
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Under pull_request_target, github.ref is always the base branch (main) for
+  # every PR, so keying on it alone would put every PR in the same group and
+  # cancel-in-progress would kill one PR's in-flight validation whenever
+  # another PR is opened or pushed to. Key on the PR number when there is one;
+  # fall back to github.ref for workflow_dispatch runs (C5).
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -97,10 +102,17 @@ jobs:
       TARGET_BASE_REF: ${{ github.event.pull_request.base.ref }}
 
     steps:
+      # pull_request_target always checks out `main` (the base repo), never the
+      # fork's ref, so every local action and script below is trusted code --
+      # see the "Checkout PR content" step below for the PR content itself.
+      # workflow_dispatch has no PR/fork to protect against, and the whole
+      # point of dispatching a branch is to validate THAT branch, so it checks
+      # out the dispatched ref (github.ref) instead of hard-coding main (R3):
+      # dispatching on branch X must audit X, not silently audit main.
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'main' }}
           fetch-depth: 0 # Fetch all history to compare with base branch
 
       # Fork content lands in pr/ as data the auditor READS -- nothing here builds,
@@ -144,19 +156,55 @@ jobs:
         run: |
           echo "Detecting changed files in instructions/ folder..."
 
+          # On pull_request_target the PR content is checked out at pr/ (see
+          # "Checkout PR content" above). workflow_dispatch has no such
+          # checkout -- the dispatched ref is the repo checked out at `.` --
+          # so using "pr" there would point git at a directory that doesn't
+          # exist and every command below would silently no-op (C6).
+          if [ "$GITHUB_EVENT_NAME" = "pull_request_target" ]; then
+            PR_DIR="pr"
+          else
+            PR_DIR="."
+          fi
+          echo "pr_dir=$PR_DIR" >> $GITHUB_OUTPUT
+
           if [ -n "$TARGET_BASE_REF" ]; then
             BASE_BRANCH="$TARGET_BASE_REF"
-            git -C pr remote add base "https://github.com/$GITHUB_REPOSITORY.git"
-            git -C pr fetch base "$BASE_BRANCH"
+            git -C "$PR_DIR" remote add base "https://github.com/$GITHUB_REPOSITORY.git"
+            git -C "$PR_DIR" fetch base "$BASE_BRANCH"
             BASE_REF="base/$BASE_BRANCH"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # No PR base ref on a manual dispatch. HEAD^ (the immediate parent
+            # commit) is the wrong comparison here: dispatching a long-lived
+            # feature branch would only ever see its last commit's worth of
+            # changes, not everything the branch has accumulated relative to
+            # main. Diff against origin/main instead. The checkout step above
+            # only fetched the dispatched ref's history, so fetch main
+            # explicitly (fetch-depth: 0 there means this is a full, unshallow
+            # fetch, not a shallow one that would need extra depth) (R3).
+            #
+            # Exception: dispatching main itself (the UI's default selection)
+            # makes origin/main and HEAD the same commit, so
+            # origin/main...HEAD is always empty and the run would silently
+            # validate nothing. Use HEAD^ in that one case instead (F6).
+            # $GITHUB_REF is the runner's default env var for the dispatched
+            # ref -- no `${{ github.ref }}` interpolation needed here.
+            git -C "$PR_DIR" fetch origin main
+            if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              BASE_REF="HEAD^"
+            else
+              BASE_REF="origin/main"
+            fi
           else
             BASE_REF="HEAD^"
           fi
 
           echo "Base ref: $BASE_REF"
 
-          # Get changed files in instructions/ folder
-          CHANGED_FILES=$(git -C pr diff --name-only "$BASE_REF"...HEAD -- 'instructions/r*/**' 2>/dev/null | tr '\n' ' ' || true)
+          # Get changed files in instructions/ folder. No `|| true` here: a
+          # git failure (e.g. a bad BASE_REF) must fail the step, not be
+          # silently reported as "0 files changed" (C6).
+          CHANGED_FILES=$(git -C "$PR_DIR" diff --name-only "$BASE_REF"...HEAD -- 'instructions/r*/**' | tr '\n' ' ')
 
           echo "Changed files: $CHANGED_FILES"
           echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
@@ -165,6 +213,12 @@ jobs:
           # Count files
           if [ -z "$CHANGED_FILES" ]; then
             echo "count=0" >> $GITHUB_OUTPUT
+            # A dispatch run that finds nothing would otherwise look
+            # identical to a normal, healthy "no prompt changes" PR run --
+            # make it visible that this dispatch validated nothing (F6).
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "::notice::Dispatch run found 0 changed files under instructions/r*/** between $BASE_REF and HEAD -- nothing was validated."
+            fi
           else
             COUNT=$(echo "$CHANGED_FILES" | wc -w | tr -d ' ')
             echo "count=$COUNT" >> $GITHUB_OUTPUT
@@ -174,9 +228,10 @@ jobs:
         if: steps.changed-files.outputs.count > 0
         env:
           BASE_REF: ${{ steps.changed-files.outputs.base_ref }}
+          PR_DIR: ${{ steps.changed-files.outputs.pr_dir }}
         run: |
           mkdir -p $TMP_DIR/agents
-          git -C pr diff "$BASE_REF"...HEAD -- 'instructions/r*/**' > $DIFF_FILE 2>/dev/null || true
+          git -C "$PR_DIR" diff "$BASE_REF"...HEAD -- 'instructions/r*/**' > $DIFF_FILE
           echo "::notice::Diff generated: $(wc -l < $DIFF_FILE) lines"
 
       # allowed_non_write_users bypasses claude-code-action's own actor-permission
@@ -213,7 +268,7 @@ jobs:
             Changed count: ${{ steps.changed-files.outputs.count }}
             Output file: ${{ env.ALL_RESULTS_FILE }}
             Diff file: ${{ env.DIFF_FILE }}
-            PR content path: pr
+            PR content path: ${{ steps.changed-files.outputs.pr_dir }}
           show_full_output: false
           claude_args: |
             --model
@@ -236,6 +291,7 @@ jobs:
           CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
           BASE_REF: ${{ steps.changed-files.outputs.base_ref }}
           CHANGED_COUNT: ${{ steps.changed-files.outputs.count }}
+          PR_DIR: ${{ steps.changed-files.outputs.pr_dir }}
         run: |
           mkdir -p "$TMP_DIR"
           cat ./.github/prompts/prompt-comparison.md > "$CODEX_PROMPT_FILE"
@@ -246,7 +302,7 @@ jobs:
             printf 'Changed count: %s\n' "$CHANGED_COUNT"
             printf 'Output file: %s\n' "$ALL_RESULTS_FILE"
             printf 'Diff file: %s\n' "$DIFF_FILE"
-            printf 'PR content path: pr\n'
+            printf 'PR content path: %s\n' "$PR_DIR"
             printf '\n'
             printf 'Environment: `.agents/`, `.codex/`, and `.codex-plugin/` hold the Rosetta\n'
             printf 'instruction set -- tooling CI extracted into this workspace, not repository\n'

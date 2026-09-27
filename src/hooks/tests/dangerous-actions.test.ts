@@ -127,6 +127,33 @@ describe('pattern correctness — positive matches', () => {
       const re = DANGEROUS_BASH.find(p => p.id === 'kubectl-delete-prod')!.re;
       expect(re.test('kubectl delete pod product-svc-7c4')).toBe(false);
     });
+
+    // F3-2: common, safe IaC/cloud dev-loop commands must not match ANY pattern.
+    test.each([
+      'terraform plan',
+      'terraform apply',
+      'tofu apply',
+      'terraform validate',
+      'helm upgrade my-release ./chart',
+      'helm list',
+      'kubectl get pod product-svc-7c4',
+      'kubectl describe pod product-svc-7c4',
+      'kubectl delete pod product-svc-7c4',
+      'gcloud compute instances list',
+      'gcloud projects list',
+      'gcloud storage ls gs://bucket',
+      'gsutil rm gs://bucket/single-file',
+      'redis-cli GET mykey',
+      'redis-cli SET mykey value',
+      'aws rds describe-db-instances',
+      'aws s3 ls s3://my-bucket',
+      'docker system prune',
+      'docker volume ls',
+    ] as const)('%s does not match any DANGEROUS_BASH pattern', (cmd) => {
+      for (const p of DANGEROUS_BASH) {
+        expect(p.re.test(cmd), `Pattern "${p.id}" should not match safe command "${cmd}"`).toBe(false);
+      }
+    });
   });
 });
 
@@ -243,6 +270,20 @@ describe('evaluateDangerous — Write path rules', () => {
     const r = evaluateDangerous(writeCtx('/home/user/.aws/credentials', '[default]'));
     expect(r?.kind).toBe('advise');
     expect(adviseMessage(r)).toContain('aws-credentials');
+  });
+
+  // A8: Windows delivers native backslash paths; without normalization these credential
+  // overwrite notices never fire there.
+  test('C:\\Users\\me\\.aws\\credentials → advise (A8, Windows path)', () => {
+    const r = evaluateDangerous(writeCtx('C:\\Users\\me\\.aws\\credentials', '[default]'));
+    expect(r?.kind).toBe('advise');
+    expect(adviseMessage(r)).toContain('aws-credentials');
+  });
+
+  test('C:\\Users\\me\\.kube\\config → advise (A8, Windows path)', () => {
+    const r = evaluateDangerous(writeCtx('C:\\Users\\me\\.kube\\config', 'apiVersion: v1'));
+    expect(r?.kind).toBe('advise');
+    expect(adviseMessage(r)).toContain('kube-config');
   });
 
   test('normal .ts file → null', () => {
@@ -517,6 +558,26 @@ describe('Rosetta-AI-reviewed override — token detection (no # required)', () 
         file_path: 'schema.sql',
         old_string: 'DROP TABLE x; -- Rosetta-AI-reviewed',
         new_string: 'DROP TABLE x;',
+      },
+    };
+    expect(evaluateDangerous(ctx)).not.toBeNull();
+  });
+
+  // A9: MultiEdit must scan only `new_string`, mirroring Edit's whitelist boundary above.
+  // `old_string` is EXISTING file text an edit targets, not asserted content — a file that
+  // already contains the marker (e.g. this very patterns file, or a reviewed SQL migration)
+  // must not silently disable the soft-deny for an unrelated, unreviewed destructive edit later
+  // in the same MultiEdit call.
+  test('MultiEdit: marker ONLY in one edit.old_string (not new_string) → still denied (A9)', () => {
+    const ctx: HookContext = {
+      ide: 'claude-code', event: 'PreToolUse', toolKind: 'multi-edit',
+      toolName: 'MultiEdit', filePath: 'schema.sql', cwd: '/proj', sessionId: null,
+      toolInput: {
+        file_path: 'schema.sql',
+        edits: [
+          { old_string: 'existing text # Rosetta-AI-reviewed', new_string: 'unrelated rename' },
+          { old_string: 'b', new_string: 'DROP TABLE users;' },
+        ],
       },
     };
     expect(evaluateDangerous(ctx)).not.toBeNull();
@@ -1211,5 +1272,187 @@ describe('G-1 follow-up: bare dotfile arguments no longer flagged via shell', ()
   });
   test('cat .gitignore → null (dotfile, but not sensitive)', () => {
     expect(evaluateDangerous(bashCtx('cat .gitignore'))).toBeNull();
+  });
+});
+
+// F3-2: IaC / cloud / data-store dangerous-action pattern pack.
+// Table-driven: every new DANGEROUS_BASH pattern gets at least one positive
+// and one negative case, matching the file's existing pattern-correctness style.
+describe('F3-2 — IaC / cloud / data-store patterns', () => {
+  const reOf = (id: string): RegExp => {
+    const p = DANGEROUS_BASH.find(e => e.id === id);
+    if (!p) throw new Error(`Pattern "${id}" not found in DANGEROUS_BASH`);
+    return p.re;
+  };
+
+  test.each([
+    // --- terraform / tofu ---
+    ['terraform-destroy', 'terraform destroy', true],
+    ['terraform-destroy', 'tofu destroy -auto-approve', true],
+    ['terraform-destroy', 'terraform plan', false],
+    ['terraform-destroy', 'terraform show destroy-plan.tfplan', false],
+    ['terraform-apply-unattended', 'terraform apply -auto-approve', true],
+    ['terraform-apply-unattended', 'terraform apply --auto-approve', true],
+    ['terraform-apply-unattended', 'terraform apply -var-file=prod.tfvars -auto-approve', true],
+    ['terraform-apply-unattended', 'tofu apply -destroy', true],
+    ['terraform-apply-unattended', 'terraform apply', false],
+    ['terraform-apply-unattended', 'terraform apply plan.tfplan', false],
+    ['terraform-state-rm', 'terraform state rm aws_instance.web', true],
+    ['terraform-state-rm', 'tofu state rm module.vpc', true],
+    ['terraform-state-rm', 'terraform state list', false],
+    ['terraform-workspace-delete', 'terraform workspace delete staging', true],
+    ['terraform-workspace-delete', 'terraform workspace select staging', false],
+    ['terraform-force-unlock', 'terraform force-unlock 1234-5678', true],
+    ['terraform-force-unlock', 'terraform plan -lock=false', false],
+
+    // --- helm ---
+    ['helm-uninstall', 'helm uninstall my-release', true],
+    ['helm-uninstall', 'helm delete my-release -n prod', true],
+    ['helm-uninstall', 'helm upgrade my-release ./chart', false],
+
+    // --- kubectl ---
+    ['kubectl-delete-prod', 'kubectl delete namespace prod', true],
+    ['kubectl-delete-prod', 'kubectl delete ns prod', true],
+    ['kubectl-delete-prod', 'kubectl delete pv my-pv', true],
+    ['kubectl-delete-prod', 'kubectl delete pvc my-pvc', true],
+    ['kubectl-delete-prod', 'kubectl delete crd widgets.example.com', true],
+    ['kubectl-delete-prod', 'kubectl delete pods --all', true],
+    ['kubectl-delete-prod', 'kubectl delete pod product-svc-7c4', false],
+    ['kubectl-delete-prod', 'kubectl delete pod product-svc-7c4 --namespace=prod', false],
+    ['kubectl-delete-prod', 'kubectl get namespace prod', false],
+    ['kubectl-drain', 'kubectl drain node-1 --ignore-daemonsets', true],
+    ['kubectl-drain', 'kubectl cordon node-1', false],
+    ['kubectl-replace-force', 'kubectl replace --force -f pod.yaml', true],
+    ['kubectl-replace-force', 'kubectl replace -f pod.yaml --force', true],
+    ['kubectl-replace-force', 'kubectl replace -f pod.yaml', false],
+
+    // --- pulumi ---
+    ['pulumi-destroy', 'pulumi destroy --yes', true],
+    ['pulumi-destroy', 'pulumi preview', false],
+    ['pulumi-stack-rm', 'pulumi stack rm prod', true],
+    ['pulumi-stack-rm', 'pulumi stack ls', false],
+
+    // --- gcloud ---
+    ['gcloud-projects-delete', 'gcloud projects delete my-project', true],
+    ['gcloud-projects-delete', 'gcloud projects list', false],
+    ['gcloud-sql-instances-delete', 'gcloud sql instances delete my-db', true],
+    ['gcloud-sql-instances-delete', 'gcloud sql instances list', false],
+    ['gcloud-container-clusters-delete', 'gcloud container clusters delete my-cluster', true],
+    ['gcloud-container-clusters-delete', 'gcloud container clusters list', false],
+    ['gcloud-compute-instances-delete', 'gcloud compute instances delete my-vm', true],
+    ['gcloud-compute-instances-delete', 'gcloud compute instances list', false],
+    ['gcloud-storage-rm-recursive', 'gcloud storage rm -r gs://bucket/path', true],
+    ['gcloud-storage-rm-recursive', 'gsutil rm -r gs://bucket/path', true],
+    ['gcloud-storage-rm-recursive', 'gsutil rm gs://bucket/single-file', false],
+    ['gcloud-storage-rm-recursive', 'gcloud storage ls gs://bucket', false],
+
+    // --- aws ---
+    ['aws-rds-delete', 'aws rds delete-db-instance --db-instance-identifier prod', true],
+    ['aws-rds-delete', 'aws rds delete-db-cluster --db-cluster-identifier prod', true],
+    ['aws-rds-delete', 'aws rds describe-db-instances', false],
+    ['aws-ec2-terminate-instances', 'aws ec2 terminate-instances --instance-ids i-0abcd', true],
+    ['aws-ec2-terminate-instances', 'aws ec2 describe-instances', false],
+    ['aws-cloudformation-delete-stack', 'aws cloudformation delete-stack --stack-name prod', true],
+    ['aws-cloudformation-delete-stack', 'aws cloudformation describe-stacks', false],
+    ['aws-eks-delete-cluster', 'aws eks delete-cluster --name prod', true],
+    ['aws-eks-delete-cluster', 'aws eks describe-cluster --name prod', false],
+    ['aws-dynamodb-delete-table', 'aws dynamodb delete-table --table-name prod', true],
+    ['aws-dynamodb-delete-table', 'aws dynamodb describe-table --table-name prod', false],
+    ['aws-s3-rb-force', 'aws s3 rb s3://my-bucket --force', true],
+    ['aws-s3-rb-force', 'aws s3 rb s3://my-bucket', false],
+    ['aws-s3-rb-force', 'aws s3 ls s3://my-bucket', false],
+
+    // --- az ---
+    ['az-group-delete', 'az group delete --name my-rg --yes', true],
+    ['az-group-delete', 'az group list', false],
+    ['az-aks-delete', 'az aks delete --name my-cluster --resource-group rg', true],
+    ['az-aks-delete', 'az aks list', false],
+    ['az-sql-db-delete', 'az sql db delete --name mydb --server srv', true],
+    ['az-sql-db-delete', 'az sql db list --server srv', false],
+
+    // --- data stores ---
+    ['redis-flushall', 'redis-cli FLUSHALL', true],
+    ['redis-flushall', 'redis-cli -h prod.cache.internal FLUSHDB', true],
+    ['redis-flushall', 'redis-cli flushall', true],
+    ['redis-flushall', 'redis-cli GET mykey', false],
+    ['mongo-drop-database', 'db.dropDatabase()', true],
+    ['mongo-drop-database', "mongosh --eval 'db.dropDatabase()'", true],
+    ['mongo-drop-database', 'db.getSiblingDB("x").dropDatabase()', true],
+    ['mongo-drop-database', 'db.collection.drop()', false],
+    ['mongo-drop-database', 'db.dropDatabaseBackup()', false],
+
+    // --- docker / gh ---
+    ['docker-system-prune-all', 'docker system prune -a', true],
+    ['docker-system-prune-all', 'docker system prune --all --volumes', true],
+    ['docker-system-prune-all', 'docker system prune', false],
+    ['docker-system-prune-all', 'docker system df', false],
+    ['docker-volume-prune', 'docker volume prune', true],
+    ['docker-volume-prune', 'docker volume prune -f', true],
+    ['docker-volume-prune', 'docker volume ls', false],
+    ['gh-repo-delete', 'gh repo delete my-org/my-repo --yes', true],
+    ['gh-repo-delete', 'gh repo view my-org/my-repo', false],
+    ['gh-repo-delete', 'gh repo clone my-org/my-repo', false],
+  ] as const)('%s: %s → %s', (id, command, expected) => {
+    expect(reOf(id).test(command)).toBe(expected);
+  });
+
+  test('every F3-2 pattern is present with the "reconsider" tier', () => {
+    const ids = [
+      'terraform-destroy', 'terraform-apply-unattended', 'terraform-state-rm',
+      'terraform-workspace-delete', 'terraform-force-unlock', 'helm-uninstall',
+      'kubectl-delete-prod', 'kubectl-drain', 'kubectl-replace-force',
+      'pulumi-destroy', 'pulumi-stack-rm', 'gcloud-projects-delete',
+      'gcloud-sql-instances-delete', 'gcloud-container-clusters-delete',
+      'gcloud-compute-instances-delete', 'gcloud-storage-rm-recursive',
+      'aws-rds-delete', 'aws-ec2-terminate-instances',
+      'aws-cloudformation-delete-stack', 'aws-eks-delete-cluster',
+      'aws-dynamodb-delete-table', 'aws-s3-rb-force', 'az-group-delete',
+      'az-aks-delete', 'az-sql-db-delete', 'redis-flushall',
+      'mongo-drop-database', 'docker-system-prune-all', 'docker-volume-prune',
+      'gh-repo-delete',
+    ];
+    for (const id of ids) {
+      const p = DANGEROUS_BASH.find(e => e.id === id);
+      expect(p, `${id} must exist in DANGEROUS_BASH`).toBeDefined();
+      expect(p!.policy, `${id} must be reconsider-tier`).toBe('reconsider');
+    }
+  });
+
+  test('every F3-2 bash pattern has a payload-content mirror', () => {
+    const bashIds = [
+      'terraform-destroy', 'terraform-apply-unattended', 'terraform-state-rm',
+      'terraform-workspace-delete', 'terraform-force-unlock', 'helm-uninstall',
+      'kubectl-drain', 'kubectl-replace-force', 'pulumi-destroy', 'pulumi-stack-rm',
+      'gcloud-projects-delete', 'gcloud-sql-instances-delete',
+      'gcloud-container-clusters-delete', 'gcloud-compute-instances-delete',
+      'gcloud-storage-rm-recursive', 'aws-rds-delete', 'aws-ec2-terminate-instances',
+      'aws-cloudformation-delete-stack', 'aws-eks-delete-cluster',
+      'aws-dynamodb-delete-table', 'aws-s3-rb-force', 'az-group-delete',
+      'az-aks-delete', 'az-sql-db-delete', 'redis-flushall', 'mongo-drop-database',
+      'docker-system-prune-all', 'docker-volume-prune', 'gh-repo-delete',
+    ];
+    for (const id of bashIds) {
+      expect(
+        DANGEROUS_CONTENT.some(p => p.id === `content-${id}`),
+        `content-${id} must exist in DANGEROUS_CONTENT`
+      ).toBe(true);
+    }
+    // kubectl-delete-prod's content mirror uses a descriptive id, not content-<id>.
+    expect(DANGEROUS_CONTENT.some(p => p.id === 'content-kubectl-delete-critical')).toBe(true);
+  });
+
+  describe('payload-content scan catches destructive commands written into scripts', () => {
+    test('a generated deploy.sh containing "terraform destroy" → deny via Write', () => {
+      const r = evaluateDangerous(writeCtx('/proj/scripts/deploy.sh', '#!/bin/sh\nterraform destroy -auto-approve\n'));
+      expect(r?.kind).toBe('deny');
+    });
+    test('a CI yaml containing "helm uninstall" → deny via Write', () => {
+      const r = evaluateDangerous(writeCtx('/proj/.github/workflows/ci.yml', 'run: helm uninstall my-release -n prod\n'));
+      expect(r?.kind).toBe('deny');
+    });
+    test('a script with only safe commands → null', () => {
+      const r = evaluateDangerous(writeCtx('/proj/scripts/deploy.sh', '#!/bin/sh\nterraform plan\nhelm upgrade my-release ./chart\n'));
+      expect(r).toBeNull();
+    });
   });
 });

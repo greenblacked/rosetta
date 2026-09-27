@@ -15,6 +15,18 @@ File not found = not created yet → continue, do NOT error; STRONGLY suggest wo
 
 </project-files>
 
+<resume_detection>
+
+Single resume mechanism for every mode and workflow; `rosetta` and flows reference this, never reimplement.
+
+1. `ls agents/TEMP/*/*-state.md agents/*-flow-state.md plans/*/plan.json 2>/dev/null` — one cheap listing. No match → skip silently, zero extra cost.
+2. Any match: read only its status/phase line, not the full file.
+3. Not marked complete → report one line per match: flow, feature, current phase, last updated.
+4. USE SKILL `hitl` gate "context conflicts with stated user intent" → ask resume / start fresh / archive; never assume.
+5. Resume: load that state file fully; extract completed steps, current phase, pending work; continue from there.
+
+</resume_detection>
+
 <bootstrap_rosetta_files>
 
 Rosetta files: terse, SRP/DRY/MECE. Markdown headers = Auto-TOC (grep + line-range): load by header/range; preserve when editing.

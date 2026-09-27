@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { runBenchSuite, validateEvalResultItem } from '../src/runner.js';
 import type Anthropic from '@anthropic-ai/sdk';
+import { APIError } from '@anthropic-ai/sdk';
 import type { BenchConfig } from '../src/types.js';
+
+// C7: runner.ts routes every messages call through `.stream(params).finalMessage()`
+// (like the optimizer already does), so fakes here expose `stream()`, not `create()`.
+function fakeMessages(handler: (params: any) => Promise<any>): {
+  stream: (params: any) => { finalMessage: () => Promise<any> };
+} {
+  return {
+    stream: (params: any) => ({ finalMessage: () => handler(params) }),
+  };
+}
 
 describe('validateEvalResultItem', () => {
   it('normalizes to the public eval result shape and drops evidence', () => {
@@ -72,23 +83,21 @@ describe('runBenchSuite eval failure semantics', () => {
     };
     let createCalls = 0;
     const client = {
-      messages: {
-        async create() {
-          createCalls++;
-          if (createCalls === 1) {
-            return {
-              content: [{ type: 'text', text: 'assistant final' }],
-              usage: { input_tokens: 11, output_tokens: 13 },
-              stop_reason: 'end_turn',
-            };
-          }
+      messages: fakeMessages(async () => {
+        createCalls++;
+        if (createCalls === 1) {
           return {
-            content: [{ type: 'text', text: 'not json' }],
-            usage: { input_tokens: 17, output_tokens: 19 },
+            content: [{ type: 'text', text: 'assistant final' }],
+            usage: { input_tokens: 11, output_tokens: 13 },
             stop_reason: 'end_turn',
           };
-        },
-      },
+        }
+        return {
+          content: [{ type: 'text', text: 'not json' }],
+          usage: { input_tokens: 17, output_tokens: 19 },
+          stop_reason: 'end_turn',
+        };
+      }),
     } as unknown as Anthropic;
 
     const [run] = await runBenchSuite(client, config);
@@ -136,41 +145,39 @@ describe('runBenchSuite eval failure semantics', () => {
     };
     let createCalls = 0;
     const client = {
-      messages: {
-        async create() {
-          createCalls++;
-          if (createCalls === 1) {
-            return {
-              content: [{ type: 'text', text: 'assistant final' }],
-              usage: { input_tokens: 11, output_tokens: 13 },
-              stop_reason: 'end_turn',
-            };
-          }
-          if (createCalls === 2) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    text: 'assertion-a',
-                    passed: 'pass',
-                    reasons: 'Meets the first assertion.',
-                    suggestions: '',
-                    confidence: 92,
-                  }),
-                },
-              ],
-              usage: { input_tokens: 17, output_tokens: 19 },
-              stop_reason: 'end_turn',
-            };
-          }
+      messages: fakeMessages(async () => {
+        createCalls++;
+        if (createCalls === 1) {
           return {
-            content: [{ type: 'text', text: 'not json' }],
-            usage: { input_tokens: 23, output_tokens: 29 },
+            content: [{ type: 'text', text: 'assistant final' }],
+            usage: { input_tokens: 11, output_tokens: 13 },
             stop_reason: 'end_turn',
           };
-        },
-      },
+        }
+        if (createCalls === 2) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  text: 'assertion-a',
+                  passed: 'pass',
+                  reasons: 'Meets the first assertion.',
+                  suggestions: '',
+                  confidence: 92,
+                }),
+              },
+            ],
+            usage: { input_tokens: 17, output_tokens: 19 },
+            stop_reason: 'end_turn',
+          };
+        }
+        return {
+          content: [{ type: 'text', text: 'not json' }],
+          usage: { input_tokens: 23, output_tokens: 29 },
+          stop_reason: 'end_turn',
+        };
+      }),
     } as unknown as Anthropic;
 
     const [run] = await runBenchSuite(client, config);
@@ -213,13 +220,11 @@ describe('thinking token derivation', () => {
     };
     const client = {
       messages: {
-        async create() {
-          return {
-            content: [{ type: 'text', text: 'assistant final' }],
-            usage: { input_tokens: 11, output_tokens: 50 },
-            stop_reason: 'end_turn',
-          };
-        },
+        ...fakeMessages(async () => ({
+          content: [{ type: 'text', text: 'assistant final' }],
+          usage: { input_tokens: 11, output_tokens: 50 },
+          stop_reason: 'end_turn',
+        })),
         async countTokens() {
           return { input_tokens: 30 };
         },
@@ -256,13 +261,11 @@ describe('thinking token derivation', () => {
     };
     const client = {
       messages: {
-        async create() {
-          return {
-            content: [{ type: 'text', text: 'hi' }],
-            usage: { input_tokens: 11, output_tokens: 3 },
-            stop_reason: 'end_turn',
-          };
-        },
+        ...fakeMessages(async () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          usage: { input_tokens: 11, output_tokens: 3 },
+          stop_reason: 'end_turn',
+        })),
         async countTokens() {
           return { input_tokens: 8 };
         },
@@ -302,12 +305,10 @@ describe('variant system prompt augmentation', () => {
       ],
     };
     const client = {
-      messages: {
-        async create(params: { system?: string }) {
-          systems.push(params.system);
-          return { content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
-        },
-      },
+      messages: fakeMessages(async (params: { system?: string }) => {
+        systems.push(params.system);
+        return { content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
     } as unknown as Anthropic;
 
     await runBenchSuite(client, config);
@@ -348,31 +349,29 @@ describe('combined judge mode (default)', () => {
 
   function combinedClient(counters: { judge: number; conv: number }): Anthropic {
     return {
-      messages: {
-        async create(params: { messages: Array<{ content: unknown }> }) {
-          const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
-          if (prompt.includes('Candidate responses:')) {
-            counters.judge++;
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    scores: [
-                      { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'good', suggestions: '', confidence: 95 },
-                      { variantId: 'v2', text: 'a1', passed: 'fail', reasons: 'bad', suggestions: 'fix', confidence: 40 },
-                    ],
-                  }),
-                },
-              ],
-              usage: { input_tokens: 5, output_tokens: 5 },
-              stop_reason: 'end_turn',
-            };
-          }
-          counters.conv++;
-          return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
-        },
-      },
+      messages: fakeMessages(async (params: { messages: Array<{ content: unknown }> }) => {
+        const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
+        if (prompt.includes('Candidate responses:')) {
+          counters.judge++;
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  scores: [
+                    { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'good', suggestions: '', confidence: 95 },
+                    { variantId: 'v2', text: 'a1', passed: 'fail', reasons: 'bad', suggestions: 'fix', confidence: 40 },
+                  ],
+                }),
+              },
+            ],
+            usage: { input_tokens: 5, output_tokens: 5 },
+            stop_reason: 'end_turn',
+          };
+        }
+        counters.conv++;
+        return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
     } as unknown as Anthropic;
   }
 
@@ -399,29 +398,27 @@ describe('combined judge mode (default)', () => {
 
   it('isolates a bad per-variant score: the other variant is still scored and the batch does not fail', async () => {
     const client = {
-      messages: {
-        async create(params: { messages: Array<{ content: unknown }> }) {
-          const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
-          if (prompt.includes('Candidate responses:')) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    scores: [
-                      { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'ok', suggestions: '', confidence: 90 },
-                      { variantId: 'v2', text: 'a1', passed: 'nope', reasons: 'x', suggestions: '', confidence: 50 },
-                    ],
-                  }),
-                },
-              ],
-              usage: { input_tokens: 5, output_tokens: 5 },
-              stop_reason: 'end_turn',
-            };
-          }
-          return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
-        },
-      },
+      messages: fakeMessages(async (params: { messages: Array<{ content: unknown }> }) => {
+        const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
+        if (prompt.includes('Candidate responses:')) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  scores: [
+                    { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'ok', suggestions: '', confidence: 90 },
+                    { variantId: 'v2', text: 'a1', passed: 'nope', reasons: 'x', suggestions: '', confidence: 50 },
+                  ],
+                }),
+              },
+            ],
+            usage: { input_tokens: 5, output_tokens: 5 },
+            stop_reason: 'end_turn',
+          };
+        }
+        return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
     } as unknown as Anthropic;
 
     const runs = await runBenchSuite(client, combinedConfig(1));
@@ -436,27 +433,25 @@ describe('combined judge mode (default)', () => {
 
   it('accepts a bare top-level array from the judge (not only the {scores} envelope)', async () => {
     const client = {
-      messages: {
-        async create(params: { messages: Array<{ content: unknown }> }) {
-          const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
-          if (prompt.includes('Candidate responses:')) {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify([
-                    { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'g', suggestions: '', confidence: 88 },
-                    { variantId: 'v2', text: 'a1', passed: 'partial', reasons: 'm', suggestions: '', confidence: 60 },
-                  ]),
-                },
-              ],
-              usage: { input_tokens: 5, output_tokens: 5 },
-              stop_reason: 'end_turn',
-            };
-          }
-          return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
-        },
-      },
+      messages: fakeMessages(async (params: { messages: Array<{ content: unknown }> }) => {
+        const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
+        if (prompt.includes('Candidate responses:')) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify([
+                  { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'g', suggestions: '', confidence: 88 },
+                  { variantId: 'v2', text: 'a1', passed: 'partial', reasons: 'm', suggestions: '', confidence: 60 },
+                ]),
+              },
+            ],
+            usage: { input_tokens: 5, output_tokens: 5 },
+            stop_reason: 'end_turn',
+          };
+        }
+        return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
     } as unknown as Anthropic;
 
     const runs = await runBenchSuite(client, combinedConfig(1));
@@ -467,30 +462,28 @@ describe('combined judge mode (default)', () => {
   it('disables thinking on judge calls', async () => {
     const judgeThinking: unknown[] = [];
     const client = {
-      messages: {
-        async create(params: { messages: Array<{ content: unknown }>; thinking?: unknown }) {
-          const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
-          if (prompt.includes('Candidate responses:')) {
-            judgeThinking.push(params.thinking);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    scores: [
-                      { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'g', suggestions: '', confidence: 90 },
-                      { variantId: 'v2', text: 'a1', passed: 'pass', reasons: 'g', suggestions: '', confidence: 90 },
-                    ],
-                  }),
-                },
-              ],
-              usage: { input_tokens: 5, output_tokens: 5 },
-              stop_reason: 'end_turn',
-            };
-          }
-          return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
-        },
-      },
+      messages: fakeMessages(async (params: { messages: Array<{ content: unknown }>; thinking?: unknown }) => {
+        const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
+        if (prompt.includes('Candidate responses:')) {
+          judgeThinking.push(params.thinking);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  scores: [
+                    { variantId: 'v1', text: 'a1', passed: 'pass', reasons: 'g', suggestions: '', confidence: 90 },
+                    { variantId: 'v2', text: 'a1', passed: 'pass', reasons: 'g', suggestions: '', confidence: 90 },
+                  ],
+                }),
+              },
+            ],
+            usage: { input_tokens: 5, output_tokens: 5 },
+            stop_reason: 'end_turn',
+          };
+        }
+        return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
     } as unknown as Anthropic;
 
     await runBenchSuite(client, combinedConfig(1));
@@ -517,15 +510,13 @@ describe('failure isolation', () => {
       ],
     };
     const client = {
-      messages: {
-        async create(params: { messages: Array<{ content: unknown }> }) {
-          const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
-          if (prompt.includes('BOOM')) {
-            throw Object.assign(new Error('bad request'), { status: 400 }); // non-retryable
-          }
-          return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
-        },
-      },
+      messages: fakeMessages(async (params: { messages: Array<{ content: unknown }> }) => {
+        const prompt = String(params.messages[params.messages.length - 1]?.content ?? '');
+        if (prompt.includes('BOOM')) {
+          throw Object.assign(new Error('bad request'), { status: 400 }); // non-retryable
+        }
+        return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
     } as unknown as Anthropic;
 
     const runs = await runBenchSuite(client, config);
@@ -535,5 +526,200 @@ describe('failure isolation', () => {
     expect(boom.error).toMatch(/bad request/);
     expect(ok.error).toBeUndefined();
     expect(ok.turns[0].assistantText).toBe('answer');
+  });
+});
+
+describe('C7: streaming client + non-retryable status-less errors', () => {
+  it('succeeds through a client that exposes only stream() with a high maxOutputTokens (would break non-streaming create)', async () => {
+    const config: BenchConfig = {
+      model: 'claude-sonnet-5',
+      maxOutputTokens: 32000,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    // No `create` on this fake at all — proves runner.ts calls `.stream().finalMessage()`.
+    const client = {
+      messages: {
+        stream() {
+          return {
+            finalMessage: async () => ({
+              content: [{ type: 'text', text: 'answer' }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+              stop_reason: 'end_turn',
+            }),
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const [run] = await runBenchSuite(client, config);
+    expect(run.error).toBeUndefined();
+    expect(run.turns[0].assistantText).toBe('answer');
+  });
+
+  it('throws a status-less AnthropicError immediately, with no retry', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: {
+        stream() {
+          calls++;
+          return {
+            finalMessage: async () => {
+              // No `status` field — the SDK's own pre-flight errors (e.g. "Streaming is
+              // required...") look like this, and must not be retried as if transient.
+              throw new Error('non-retryable, status-less error');
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const runs = await runBenchSuite(client, config);
+    expect(runs[0].error).toMatch(/non-retryable, status-less error/);
+    expect(calls).toBe(1);
+  });
+});
+
+describe('R2: mid-stream SSE `error` events (status-less APIError)', () => {
+  it('retries a status-less APIError with a transient error type (overloaded_error) and succeeds', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: {
+        stream() {
+          calls++;
+          return {
+            finalMessage: async () => {
+              if (calls === 1) {
+                // Mirrors the SDK's mid-stream SSE `error` event handling in
+                // core/streaming.ts: `new APIError(undefined, body, undefined, headers, type)`.
+                throw new APIError(undefined, { error: { type: 'overloaded_error' } }, undefined, undefined, 'overloaded_error');
+              }
+              return {
+                content: [{ type: 'text', text: 'answer' }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+                stop_reason: 'end_turn',
+              };
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const [run] = await runBenchSuite(client, config);
+    expect(run.error).toBeUndefined();
+    expect(run.turns[0].assistantText).toBe('answer');
+    expect(calls).toBe(2);
+  });
+
+  it('does not retry a status-less APIError with a non-transient error type (invalid_request_error)', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: {
+        stream() {
+          calls++;
+          return {
+            finalMessage: async () => {
+              throw new APIError(undefined, { error: { type: 'invalid_request_error' } }, undefined, undefined, 'invalid_request_error');
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const runs = await runBenchSuite(client, config);
+    expect(runs[0].error).toMatch(/invalid_request_error/);
+    expect(calls).toBe(1);
+  });
+
+  it('retries a status-less APIError with a transient error type (timeout_error) and succeeds', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: {
+        stream() {
+          calls++;
+          return {
+            finalMessage: async () => {
+              if (calls === 1) {
+                // Mid-stream SSE `error` event with type `timeout_error` — the streaming
+                // equivalent of an HTTP 504 — must be retried like its status-based sibling.
+                throw new APIError(undefined, { error: { type: 'timeout_error' } }, undefined, undefined, 'timeout_error');
+              }
+              return {
+                content: [{ type: 'text', text: 'answer' }],
+                usage: { input_tokens: 1, output_tokens: 1 },
+                stop_reason: 'end_turn',
+              };
+            },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+
+    const [run] = await runBenchSuite(client, config);
+    expect(run.error).toBeUndefined();
+    expect(run.turns[0].assistantText).toBe('answer');
+    expect(calls).toBe(2);
+  });
+});
+
+describe('529 overloaded HTTP status is retried', () => {
+  it('retries an HTTP 529 (overloaded) error and succeeds', async () => {
+    const config: BenchConfig = {
+      model: 'm',
+      maxOutputTokens: 128,
+      thinking: NO_THINKING,
+      repetitions: 1,
+      concurrency: 1,
+      suites: [{ id: 's', variants: [{ id: 'v1', turns: ['hi'] }] }],
+    };
+    let calls = 0;
+    const client = {
+      messages: fakeMessages(async () => {
+        calls++;
+        if (calls === 1) {
+          throw Object.assign(new Error('overloaded'), { status: 529 });
+        }
+        return { content: [{ type: 'text', text: 'answer' }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: 'end_turn' };
+      }),
+    } as unknown as Anthropic;
+
+    const [run] = await runBenchSuite(client, config);
+    expect(run.error).toBeUndefined();
+    expect(run.turns[0].assistantText).toBe('answer');
+    expect(calls).toBe(2);
   });
 });

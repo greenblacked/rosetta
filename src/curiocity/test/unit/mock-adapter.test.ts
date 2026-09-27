@@ -1,9 +1,15 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import { MockAdapter } from '../../src/agents/mock/adapter';
 import type { TrialContext } from '../../src/agents/types';
+
+// E5: every mkdtemp'd dir this file creates is tracked here and removed afterward.
+const createdDirs: string[] = [];
+afterAll(() => {
+  for (const d of createdDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 const adapter = new MockAdapter();
 
@@ -70,6 +76,7 @@ describe('MockAdapter (§10.3) dialect + protocol', () => {
 
   it('locateTranscript prefers the authoritative session-start payload, else falls back', async () => {
     const ctrlDir = mkdtempSync(join(tmpdir(), 'ctrl-'));
+    createdDirs.push(ctrlDir);
     const ctx = { ctrlDir } as TrialContext;
     // Fallback when session-start.json is absent.
     expect((await adapter.locateTranscript(ctx)).kind).toBe('fallback');

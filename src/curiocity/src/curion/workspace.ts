@@ -1,6 +1,6 @@
-import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import extract from 'extract-zip';
 import { execa } from 'execa';
 
@@ -19,11 +19,66 @@ export function createCtrlDir(): string {
   return mkdtempSync(join(tmpdir(), 'curiocity-ctrl-'));
 }
 
+/**
+ * (E3) Raised when an unzipped case's `src.zip` materializes a symlink that resolves
+ * outside the workspace (or a dangling one that cannot be verified as safe). `extract-zip`
+ * (GHSA-jmr9-qjv8-65gv) blocks WRITES through such a symlink but still creates the link
+ * itself; a later step (evaluator, snapshot/diff) can then follow it out of the sandbox.
+ * `lifecycle.ts` maps this to trial status `setup-error`.
+ */
+export class UnsafeSymlinkError extends Error {}
+
+/**
+ * (R10) `path.relative()` returns a string starting with the two characters ".." for
+ * BOTH an actual parent-escape (`..`, `../sibling`) AND an in-workspace name that
+ * merely starts with two dots (e.g. a directory literally named `..shared`, so
+ * `relative()` yields `..shared/file.txt`). Only `rel === '..'` or a `rel` starting
+ * with `'..' + sep` is a real escape; a name like `..shared` is not `..` followed by a
+ * separator, so it must NOT be rejected. `!rel.startsWith('..')` (the old check)
+ * conflated the two and rejected legitimate in-workspace symlink targets.
+ */
+function isInside(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel));
+}
+
+/** (E3) Walk `workspace` and reject any symlink whose target escapes it — including a
+ *  dangling link, which cannot be verified as safe. The escaping/dangling link is removed
+ *  either way so it cannot be followed later (evaluators, snapshot/diff, agent tools). */
+function rejectEscapingSymlinks(workspace: string): void {
+  const realWorkspace = realpathSync(workspace);
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      const st = lstatSync(full);
+      if (st.isSymbolicLink()) {
+        let real: string | null;
+        try {
+          real = realpathSync(full);
+        } catch {
+          real = null; // dangling — cannot verify, treat as unsafe
+        }
+        const safe = real !== null && isInside(realWorkspace, real);
+        if (!safe) {
+          rmSync(full, { force: true });
+          throw new UnsafeSymlinkError(
+            `Case source contains a symlink outside the workspace: "${relative(workspace, full)}"`,
+          );
+        }
+        continue; // never follow into a symlinked directory
+      }
+      if (st.isDirectory()) walk(full);
+    }
+  };
+  walk(workspace);
+}
+
 /** Unzip `src.zip` into the workspace; strip the macOS `__MACOSX` sidecar (§7). */
 export async function unzipSource(zipPath: string, workspace: string): Promise<void> {
   await extract(zipPath, { dir: workspace });
   const macosx = join(workspace, '__MACOSX');
   if (existsSync(macosx)) rmSync(macosx, { recursive: true, force: true });
+  rejectEscapingSymlinks(workspace);
 }
 
 /** Copy an inline `--src <dir>` into the workspace. */

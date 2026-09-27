@@ -162,3 +162,137 @@ def test_explicit_argument_wins_over_environment_variable_and_url(monkeypatch):
 
 def test_explicit_argument_wins_for_the_default_url():
     assert RosettaConfig.from_env_vars(environment="dev").environment == "dev"
+
+
+# --- B1: explicit --env / --env-file must override pre-existing shell env -----
+
+
+def test_explicit_environment_overrides_preexisting_shell_env(tmp_path, monkeypatch):
+    """`--env dev` must win even if the shell already exported prod values."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-prod.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-PRODKEY")
+
+    (tmp_path / ".env.dev").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-dev.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-DEVKEY\n"
+    )
+
+    config = RosettaConfig.from_env(environment="dev")
+
+    assert config.base_url == "https://ragflow-dev.example.com"
+    assert config.api_key == "ragflow-DEVKEY"
+
+
+def test_env_name_with_env_file_var_overrides_shell_env(tmp_path, monkeypatch):
+    """`--env NAME` combined with ROSETTA_CLI_ENV_FILE must still override.
+
+    When the file is selected via ROSETTA_CLI_ENV_FILE (itself an explicit,
+    user-chosen file - see ENV_FILE_ENV_VAR and find_env_file()), that choice
+    is explicit even though its basename isn't `.env.<NAME>`. Regression: this
+    previously fell through to the non-overriding "generic .env fallback"
+    path and silently kept the pre-existing shell env.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-prod.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-PRODKEY")
+
+    env_file = tmp_path / "custom.env"
+    env_file.write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-dev.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-DEVKEY\n"
+    )
+    monkeypatch.setenv("ROSETTA_CLI_ENV_FILE", str(env_file))
+
+    config = RosettaConfig.from_env(environment="dev")
+
+    assert config.base_url == "https://ragflow-dev.example.com"
+    assert config.api_key == "ragflow-DEVKEY"
+
+
+def test_explicit_env_file_overrides_preexisting_shell_env(tmp_path, monkeypatch):
+    """An explicit `--env-file` path must also win over pre-existing shell env."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-prod.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-PRODKEY")
+
+    env_file = tmp_path / "custom.env"
+    env_file.write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-dev.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-DEVKEY\n"
+    )
+
+    config = RosettaConfig.from_env(env_file=str(env_file))
+
+    assert config.base_url == "https://ragflow-dev.example.com"
+    assert config.api_key == "ragflow-DEVKEY"
+
+
+def test_auto_discovered_env_file_does_not_override_shell_env(tmp_path, monkeypatch):
+    """Without an explicit --env/--env-file, shell env vars keep precedence."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-prod.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-PRODKEY")
+
+    (tmp_path / ".env").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-dev.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-DEVKEY\n"
+    )
+
+    config = RosettaConfig.from_env()
+
+    assert config.base_url == "https://ragflow-prod.example.com"
+    assert config.api_key == "ragflow-PRODKEY"
+
+
+# --- R8: `--env NAME` falling back to a generic .env must NOT override --------
+
+
+def test_env_name_falling_back_to_generic_dotenv_does_not_override_shell_env(
+    tmp_path, monkeypatch
+):
+    """`--env production` in CI must not let a stray local `.env` win.
+
+    If `.env.production` does not exist, `find_env_file("production")` falls
+    back to the generic `.env`. That fallback is auto-discovery, not an
+    explicit choice of the "production" file, so it must not override
+    CI-exported RAGFLOW_* vars (regression for R8).
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-ci.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-CIKEY")
+
+    # No .env.production present, only a generic, developer-local .env.
+    (tmp_path / ".env").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-local.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-LOCALKEY\n"
+    )
+
+    config = RosettaConfig.from_env(environment="production")
+
+    assert config.base_url == "https://ragflow-ci.example.com"
+    assert config.api_key == "ragflow-CIKEY"
+
+
+def test_env_name_resolving_to_specific_dotenv_does_override_shell_env(
+    tmp_path, monkeypatch
+):
+    """`--env dev` still overrides shell env when `.env.dev` actually exists."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RAGFLOW_BASE_URL", "https://ragflow-prod.example.com")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-PRODKEY")
+
+    (tmp_path / ".env.dev").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-dev.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-DEVKEY\n"
+    )
+    # A generic .env is also present but must be ignored in favor of .env.dev.
+    (tmp_path / ".env").write_text(
+        "RAGFLOW_BASE_URL=https://ragflow-generic.example.com\n"
+        "RAGFLOW_API_KEY=ragflow-GENERICKEY\n"
+    )
+
+    config = RosettaConfig.from_env(environment="dev")
+
+    assert config.base_url == "https://ragflow-dev.example.com"
+    assert config.api_key == "ragflow-DEVKEY"

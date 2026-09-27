@@ -161,6 +161,15 @@ describe('runHook — nudge output shape', () => {
     expect(output()).toBe('');
   });
 
+  // A8: Windows delivers native backslash paths; without normalization the `tests/` and
+  // `node_modules/` exclusions never match and the nudge fires where it should stay silent.
+  test('excluded path with Windows backslashes → no stdout output at all (A8)', async () => {
+    const raw = { ...copilotCC, tool_input: { filePath: 'C:\\repo\\tests\\runner.js', content: 'x' } };
+    const { writable, output } = capture();
+    await runHook(looseFilesHook, { stdin: toStream(raw), stdout: writable });
+    expect(output()).toBe('');
+  });
+
 });
 
 describe('runHook — exclusion boundary precision', () => {

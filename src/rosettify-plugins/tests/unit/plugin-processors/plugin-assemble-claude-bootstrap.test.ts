@@ -1,4 +1,4 @@
-// FR-ARCH-0055, FR-VAR-0070 — pluginAssembleClaudeBootstrap: one shared key, once:true entries
+// FR-ARCH-0055, FR-VAR-0070 — pluginAssembleClaudeBootstrap: one shared key, no "once" (D1)
 import { describe, it, expect } from 'vitest';
 import { pluginAssembleClaudeBootstrap } from '../../../src/plugin-processors/plugin-assemble-claude-bootstrap.js';
 import type { FileProcessingFrame, PluginProcessingFrame, PluginSpec } from '../../../src/types.js';
@@ -57,12 +57,12 @@ describe('pluginAssembleClaudeBootstrap — key assignment (FR-VAR-0070)', () =>
 // ─── Entry shape (GT-3.1) ─────────────────────────────────────────────────────
 
 describe('pluginAssembleClaudeBootstrap — entry shape', () => {
-  it('entries contain "once": true', () => {
+  it('entries contain no "once" field (D1: SessionStart must re-fire on clear/compact)', () => {
     const frames = [makeDocFrame('plugin-files-mode', '\n# Body\n')];
     const p = makePluginFrame(frames);
     const result = pluginAssembleClaudeBootstrap(p);
     const payload = result.templateContext['bootstrap_hooks'] as string;
-    expect(payload).toContain('"once": true');
+    expect(payload).not.toContain('"once"');
   });
 
   it('entries contain "type": "command"', () => {

@@ -1,5 +1,5 @@
 ---
-name: coding-flow
+name: coding-light-flow
 description: "Light coding workflow: features, fixes, refactors, unit tests, etc.; scales small to large."
 tags: ["workflow"]
 baseSchema: docs/schemas/workflow.md
@@ -33,6 +33,7 @@ Lightweight variant: a single architect pass produces discovery, design, specs, 
 11. Run architect subagent with required model in the background and consult with it if already supported or prefer advisor if already available
 12. Coding workflow state MUST be saved to `agents/TEMP/<FEATURE>/coding-flow-state.md` file.
 13. If context already contains request for TDD => implement properly red and green adjusting this workflow, including by moving execution of phases `tests` and `review_tests` to be after `user_review_design` and before `implementation`.
+14. If input is a security remediation task (from `security-flow` package): USE SKILL `security` (remediation-task contract) + `sensitive-data`; treat the task's acceptance criteria as specs input; reproduce the finding before design/implementation; on completion run `security_reverify`.
 
 </prerequisites>
 
@@ -40,7 +41,7 @@ Lightweight variant: a single architect pass produces discovery, design, specs, 
 
 Execute strongly in the specified order. A step MUST NOT start before the previous step is complete.
 
-1. Step 1: Discover project context, affected and related code, dependencies, constraints, and requirements; derive the architecture requirements that address the user request fully. Input: user request + `CONTEXT.md` + `ARCHITECTURE.md` + `IMPLEMENTATION.md`. Do not stop until 100% clear.
+1. Step 1: Discover project context, affected and related code, dependencies, constraints, and requirements; derive the architecture requirements that address the user request fully. Input: user request + `CONTEXT.md` + `ARCHITECTURE.md` + `IMPLEMENTATION.md`. If input is a security remediation task: reproduce the finding locally first; record reproduction evidence; unreproducible → stop and escalate via `hitl`, do not guess a fix. Do not stop until 100% clear.
 2. Step 2: Design 3 best architecture solutions on high level with pro/cons analysis.
 3. Step 3: Define the best solution, but concise, phrase-terse, compressed, etc. Record Steps 1-3 as concise `architecture-notes.md` in FEATURE PLAN folder.
 4. Step 4: Once done, USE SKILL `tech-specs` (load JIT) to create `plans/<FEATURE>/<FEATURE>-SPECS.md`. Specs own WHAT.
@@ -125,6 +126,16 @@ Execute strongly in the specified order. A step MUST NOT start before the previo
 6. Update `coding-flow-state.md`
 
 </final_validation>
+
+<security_reverify phase="9" applies="if input is a security remediation task" subagent="executor" role="Bounded deterministic security-gate operator" subagent_required_model="claude-haiku-4-5" must-be-subagent>
+
+1. USE FLOW `security-flow.md` TO APPLY PHASE `security-flow-deterministic-gates.md`, scoped to the task's affected targets only.
+2. Input: the fix diff; the task's finding IDs and acceptance criteria; the original run's authorization scope (reuse it; missing → ask via `hitl`, never silently widen scope).
+3. Output: gate result appended to the task file — `fixed` (CLEAN), `still-open` (HIGH+), or `not-reproduced`.
+4. `fixed` → report in the completion summary, no new gate. `still-open` or `not-reproduced` → reopen `user_review_design` for re-approval before closing; never close silently.
+5. Update `coding-flow-state.md`.
+
+</security_reverify>
 
 </workflow_phases>
 
