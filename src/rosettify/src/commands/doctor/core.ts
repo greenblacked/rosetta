@@ -31,7 +31,7 @@ export async function cmdDoctor(options: DoctorOptions = {}): Promise<RunEnvelop
     if (!stat.isDirectory()) return err(ERR_ROOT_NOT_FOUND);
 
     const { checks: installChecks, installs } = detectInstalls(root, options.ide);
-    const checks = [...installChecks, ...checkWorkspaceFiles(root), ...checkPlanHealth(root), ...checkHooks(installs)];
+    const checks = [...installChecks, ...checkWorkspaceFiles(root), ...checkPlanHealth(root), ...checkHooks(installs, root)];
 
     const result: DoctorResult = {
       root,

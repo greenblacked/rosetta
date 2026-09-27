@@ -16,7 +16,10 @@ export interface DoctorSummary {
   fail_count: number;
 }
 
-/** FR-DOC-0006 — one detected install's compliance data. */
+/** FR-DOC-0006 — one detected install's compliance data. `file_count`/`combined_hash` cover only
+ * Rosetta-owned files (never a user's own files that happen to sit under the install directory).
+ * `skipped_large_files` names files over the per-file size cap (not hashed, not fatal);
+ * `unreadable_files` names files that could not be read (also not fatal to the run). */
 export interface DoctorComplianceInstall {
   ide: string;
   version: string;
@@ -24,6 +27,8 @@ export interface DoctorComplianceInstall {
   file_count: number;
   truncated: boolean;
   combined_hash: string;
+  skipped_large_files: string[];
+  unreadable_files: string[];
 }
 
 export interface DoctorComplianceReport {
