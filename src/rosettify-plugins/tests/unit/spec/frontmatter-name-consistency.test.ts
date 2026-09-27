@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import matter from 'gray-matter';
-import { parseDirectives } from '../../../src/vfs/directives.js';
+import { expectedNameStemFromFilename } from '../../../src/lint/name-consistency.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..', '..');
@@ -31,8 +31,7 @@ describe('source frontmatter name == filename/dirname (C3 regression)', () => {
       const full = path.join(dir, entry.name);
       const name = frontmatterName(full);
       if (!name) continue;
-      const { cleanName } = parseDirectives(entry.name);
-      const expectedStem = cleanName.replace(/\.md$/, '');
+      const expectedStem = expectedNameStemFromFilename(entry.name);
       if (name !== expectedStem) {
         mismatches.push(`${entry.name}: name="${name}" expected="${expectedStem}"`);
       }
@@ -48,8 +47,7 @@ describe('source frontmatter name == filename/dirname (C3 regression)', () => {
       const full = path.join(dir, entry.name);
       const name = frontmatterName(full);
       if (!name) continue;
-      const { cleanName } = parseDirectives(entry.name);
-      const expectedStem = cleanName.replace(/\.md$/, '');
+      const expectedStem = expectedNameStemFromFilename(entry.name);
       if (name !== expectedStem) {
         mismatches.push(`${entry.name}: name="${name}" expected="${expectedStem}"`);
       }

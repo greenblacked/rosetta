@@ -1,0 +1,10 @@
+{
+  "destinationSuffix": "-custom",
+  "pluginNameSuffix": " (Custom)",
+  "pluginDescriptionSuffix": " Custom build.",
+  "modelOverrides": {
+    "core-cursor": {
+      "widget-9": "widget-9"
+    }
+  }
+}

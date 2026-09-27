@@ -281,6 +281,91 @@ EARS-phrased functional requirements for invocation, source resolution, run mode
   <depends>FR-ARCH-0020, FR-ARCH-0024, FR-ARCH-0042, FR-ARCH-0001, FR-CLI-0032, FR-CLI-0033, DATA-CFG-0006</depends>
 </req>
 
+## Lint mode
+
+<req id="FR-CLI-0070" type="FR" level="System" ticketId="" classification="technical"
+     source="User" priority="Must" verification="Test"
+     status="Approved" approved_by="User" changed="2026-09-27"
+     depends="FR-CLI-0010, FR-CLI-0020, FR-CLI-0030, FR-CLI-0032"
+     implementation="Implemented">
+  <title>Lint run mode</title>
+  <statement>The generator shall accept a `--lint` flag that, instead of generating any target, resolves the instruction source for the selected release, domain and profile (FR-CLI-0010, FR-CLI-0030/0031, FR-CLI-0032) through the same VFS and content-loading path the generate run uses, and reports deterministic findings against it. Lint mode shall write no plugin output.</statement>
+  <rationale>Cheap, deterministic invariants (dangling typed references, colliding names, unknown model tokens) should be checkable without an LLM auditor and without producing a build; reusing the existing VFS/file-loading path guarantees the linter sees exactly what a real build would see, including directive resolution and profile-scoped twins, with no second parser to drift from the first.</rationale>
+  <acceptance>
+    <criteria id="FR-CLI-0070.AC1" ears="event" when="`--lint` is supplied" system="the generator" shall="resolve the VFS for the given `--release`/`--domain`/`--profile` and run every lint rule against it instead of running the generation pipeline"/>
+    <criteria id="FR-CLI-0070.AC2" ears="event" when="`--lint` is supplied" system="the generator" shall="write no file under `--output` or any other plugin destination"/>
+    <criteria id="FR-CLI-0070.AC3" ears="unwanted" if="`--lint` is supplied together with an unknown `--release`, an unresolvable `--domain`, or a `--profile` whose descriptor cannot be loaded" system="the generator" shall="report the failure and exit with status 2 without evaluating any lint rule"/>
+  </acceptance>
+  <implementationNotes>Implemented: src/rosettify-plugins/src/cli.ts (--lint flag), src/rosettify-plugins/src/lint/lint.ts (runLint: buildVfs + profile/overwrite resolution + fileRead/fileBundle reuse, no second parser).</implementationNotes>
+</req>
+
+<req id="FR-CLI-0071" type="FR" level="System" ticketId="" classification="technical"
+     source="User" priority="Must" verification="Test"
+     status="Approved" approved_by="User" changed="2026-09-27"
+     depends="FR-CLI-0070"
+     implementation="Implemented">
+  <title>Alias-target-exists rule</title>
+  <statement>In lint mode, the generator shall report every typed command-alias reference (`USE SKILL`, `READ SKILL`, `USE FLOW`, `READ FLOW`, `APPLY PHASE`, `INVOKE SUBAGENT`, `READ SUBAGENT`, `READ RULE`/`APPLY RULE`, `READ TEMPLATE`, `READ CONFIGURE`, `READ|APPLY SKILL FILE`) whose target does not resolve to an instruction file present in the resolved VFS for the release/profile being linted, except a target listed in a documented external-reference allowlist or an obvious placeholder (a target containing `<`/`>`, or a bare connective/prose word).</statement>
+  <rationale>C3-class and dangling-reference regressions (a renamed or removed skill/workflow/rule/template/agent still referenced by its old name) are the highest-value deterministic check; a small documented allowlist covers targets that are intentionally external to this instruction source tree (e.g. the `graphify` skill the codemap skill assumes is installed separately) without silencing genuine dangling references.</rationale>
+  <acceptance>
+    <criteria id="FR-CLI-0071.AC1" ears="event" when="a typed alias target does not name any skill directory, agent, workflow/phase file, rule file, template file, configure file, or in-skill file in the resolved VFS" system="the generator" shall="emit an `alias-target-exists` finding naming the file, line, alias kind and target"/>
+    <criteria id="FR-CLI-0071.AC2" ears="event" when="an unresolved target exactly matches an entry in the external-reference allowlist for its alias kind" system="the generator" shall="not report a finding for that reference"/>
+    <criteria id="FR-CLI-0071.AC3" ears="event" when="an alias target contains `<` or `>`, or is a bare connective/prose word rather than a filename or identifier" system="the generator" shall="treat it as a placeholder and not report a finding for it"/>
+    <criteria id="FR-CLI-0071.AC4" ears="event" when="a file is named `README.md`" system="the generator" shall="exclude it from alias-target scanning, per its documented status as a maintainer document never loaded at runtime"/>
+  </acceptance>
+  <implementationNotes>Implemented: src/rosettify-plugins/src/lint/rules/alias-targets.ts; allowlist in src/rosettify-plugins/src/lint/external-refs.ts (documents each entry's reason).</implementationNotes>
+</req>
+
+<req id="FR-CLI-0072" type="FR" level="System" ticketId="138" classification="technical"
+     source="User" priority="Must" verification="Test"
+     status="Approved" approved_by="User" changed="2026-09-27"
+     depends="FR-CLI-0070"
+     implementation="Implemented">
+  <title>Unique-document-name and name/filename-consistency rule</title>
+  <statement>In lint mode, for the resolved VFS of the release/profile being linted, the generator shall report any two instruction files of the same instruction type (skill, agent, workflow/phase, rule) whose frontmatter `name` collides. For skills, agents, and workflows/phases specifically — the same scope as `tests/unit/spec/frontmatter-name-consistency.test.ts` — it shall also report a file whose frontmatter `name` does not match its own clean filename stem (or, for a skill, its own directory name), reusing that test's name/filename-stem computation rather than a second implementation of it.</statement>
+  <rationale>C3 (`coding-light-flow.md` shipping `name: coding-flow`, colliding with the real `coding-flow`) reached `main` and the generated plugins because nothing checked this. Resolving through the same profile/overwrite logic as a real build (FR-CLI-0070) is required here specifically: the ten `<agent>~profile-lightweight-only~overwrite~.md` twins intentionally share their base agent's `name` on disk and must never both be visible in one resolved view. The name/filename-match check is scoped to skills, agents and workflows because that is the existing, deliberately-scoped test's coverage; rules are not part of that test and are not held to the same match today.</rationale>
+  <acceptance>
+    <criteria id="FR-CLI-0072.AC1" ears="event" when="two resolved instruction files of the same type carry the same frontmatter `name`" system="the generator" shall="emit a `unique-document-name` finding naming both files"/>
+    <criteria id="FR-CLI-0072.AC2" ears="event" when="a resolved workflow or phase file's frontmatter `name` differs from its own clean filename stem" system="the generator" shall="emit a `name-matches-filename` finding"/>
+    <criteria id="FR-CLI-0072.AC2b" ears="event" when="a resolved agent file's frontmatter `name` differs from its own clean filename stem" system="the generator" shall="emit a `name-matches-filename` finding"/>
+    <criteria id="FR-CLI-0072.AC3" ears="event" when="a resolved skill's `SKILL.md` frontmatter `name` differs from its own skill directory name" system="the generator" shall="emit a `name-matches-filename` finding"/>
+    <criteria id="FR-CLI-0072.AC4" ears="state" while="a profile is active" system="the generator" shall="evaluate both checks only over the sources selected for that profile (post directive/overwrite resolution), never flagging a profile-scoped twin against the base file it replaces"/>
+  </acceptance>
+  <implementationNotes>Implemented: src/rosettify-plugins/src/lint/rules/name-consistency.ts, sharing its filename-stem computation with tests/unit/spec/frontmatter-name-consistency.test.ts (no duplicated logic).</implementationNotes>
+</req>
+
+<req id="FR-CLI-0073" type="FR" level="System" ticketId="" classification="technical"
+     source="User" priority="Should" verification="Test"
+     status="Approved" approved_by="User" changed="2026-09-27"
+     depends="FR-CLI-0070"
+     implementation="Implemented">
+  <title>Known-model-token rule</title>
+  <statement>In lint mode, for every agent instruction file in the resolved VFS, the generator shall report each comma-separated candidate in its frontmatter `model` field that names no vendor family recognized by any of the generator's built-in model vocabularies (`src/spec/model-maps.ts`) or, when a profile is active, by that profile's `modelOverrides` for any target.</statement>
+  <rationale>Nothing today detects a typo'd or invented model token in agent frontmatter; the model vocabularies are meant to name every model the instruction set actually uses, so a token none of them recognizes is either a typo or a model the maps have not been extended for yet, either way worth surfacing before it silently drops from a target's plugin output.</rationale>
+  <acceptance>
+    <criteria id="FR-CLI-0073.AC1" ears="event" when="an agent frontmatter `model` candidate token starts with none of the recognized vendor prefixes/substrings (`claude-`/opus/sonnet/haiku, `gpt-`, `gemini-`, `grok-`, `composer-`), is not the literal `inherit`, and matches no built-in or active-profile model-map key" system="the generator" shall="emit a `known-model-token` finding naming the file, line and token"/>
+    <criteria id="FR-CLI-0073.AC2" ears="event" when="a candidate token is recognized by any built-in vocabulary's own selection predicate (e.g. the Claude-compatible or Codex-compatible test) even without an exact map entry" system="the generator" shall="not report it, matching the generator's own tolerant fallback behavior for that token"/>
+  </acceptance>
+  <implementationNotes>Implemented: src/rosettify-plugins/src/lint/rules/model-tokens.ts, reusing `isClaudeCompatibleToken`/`isCodexToken` and the four built-in `*_VOCABULARY` maps from src/spec/model-maps.ts.</implementationNotes>
+</req>
+
+<req id="FR-CLI-0074" type="FR" level="System" ticketId="" classification="technical"
+     source="User" priority="Must" verification="Test"
+     status="Approved" approved_by="User" changed="2026-09-27"
+     depends="FR-CLI-0070, FR-CLI-0071, FR-CLI-0072, FR-CLI-0073"
+     implementation="Implemented">
+  <title>Lint output and exit status</title>
+  <statement>In lint mode, the generator shall print every finding as `file:line: [rule] message` on one line each to stdout by default, and, when `--lint-format json` is supplied, shall instead print the findings as a single JSON array on stdout. It shall exit 0 when no finding was produced, exit 1 when one or more findings were produced, and exit 2 when `--lint` is combined with a usage error (FR-CLI-0070.AC3, or an unrecognized `--lint-format` value).</statement>
+  <rationale>A stable, greppable text format keeps the tool usable from a shell and CI log; the JSON form keeps it usable from another tool without re-parsing prose; the three-way exit status lets CI distinguish "clean", "found real problems" and "could not run" (FR-CLI-0041's two-way status is not enough for a mode that can fail before it produces any finding at all).</rationale>
+  <acceptance>
+    <criteria id="FR-CLI-0074.AC1" ears="event" when="lint mode produces zero findings" system="the generator" shall="print nothing to stdout (or an empty JSON array, in JSON mode) and exit 0"/>
+    <criteria id="FR-CLI-0074.AC2" ears="event" when="lint mode produces one or more findings and no `--lint-format` is supplied" system="the generator" shall="print each as `file:line: [rule] message` on stdout and exit 1"/>
+    <criteria id="FR-CLI-0074.AC3" ears="event" when="lint mode produces one or more findings and `--lint-format json` is supplied" system="the generator" shall="print a single JSON array of `{rule, severity, file, line, message}` objects on stdout and exit 1"/>
+    <criteria id="FR-CLI-0074.AC4" ears="unwanted" if="`--lint-format` names a value other than `text` or `json`" system="the generator" shall="report usage and exit 2 without evaluating any lint rule"/>
+  </acceptance>
+  <implementationNotes>Implemented: src/rosettify-plugins/src/cli.ts (--lint-format option, exit-code wiring), src/rosettify-plugins/src/lint/format.ts.</implementationNotes>
+</req>
+
 ## Orchestration
 
 <req id="FR-CLI-0040" type="FR" level="System" ticketId="" classification="technical">
