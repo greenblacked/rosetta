@@ -16,6 +16,9 @@
 - security-flow
 - requirements-authoring-flow
 - testgen-flow
+- delivery-flow
+- change-review-flow
+- dependency-upgrade-flow
 
 ## User-enabled features referenced by workflows
 
