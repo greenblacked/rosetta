@@ -49,6 +49,11 @@ function loadSkillTargets(contextDir: string): { targets: RouteTarget[]; rosetta
 
   for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
+    // Generator filename directives (`~overwrite~`, `~profile-<name>-only~`, see
+    // src/rosettify-plugins/src/vfs/directives.ts) are resolved by the plugin generator itself;
+    // reading a source instructions dir directly (e.g. `--context instructions/r3/core`) sees the
+    // raw, unresolved variant name and must skip it or it would double up with the base file.
+    if (entry.name.includes('~')) continue;
     const skillPath = path.join(skillsDir, entry.name, 'SKILL.md');
     if (!existsSync(skillPath)) continue;
     const raw = readFileSync(skillPath, 'utf-8');
@@ -76,6 +81,10 @@ function loadWorkflowTargets(contextDir: string): RouteTarget[] {
 
   for (const file of readdirSync(workflowsDir)) {
     if (!file.endsWith('.md')) continue;
+    // Skip raw, unresolved filename-directive variants (see the skills loop above) — e.g.
+    // `coding-flow~profile-lightweight-only~overwrite~.md` alongside the base `coding-flow.md`
+    // would otherwise register as a second, colliding `workflow:coding-flow` target.
+    if (file.includes('~')) continue;
     const raw = readFileSync(path.join(workflowsDir, file), 'utf-8');
     const { fields } = parseFrontmatter(raw);
     // Only top-level, routable workflows carry tags: ["workflow"]; phase files (e.g.
@@ -91,6 +100,32 @@ function loadWorkflowTargets(contextDir: string): RouteTarget[] {
   return targets;
 }
 
+/** Defensive de-dup by `kind:name` (the same key `route-runner`/`validateCasesAgainstTargets` use).
+ * The `~`-directive skip above should already prevent duplicates from filename-directive variants,
+ * but this guards against any other source of two files resolving to the same routable name/kind
+ * (e.g. a case-only filename difference). An identical duplicate (same description) is silently
+ * collapsed to its first occurrence; a duplicate with a *different* description is a real content
+ * conflict and fails loudly rather than silently picking one at random. */
+function dedupeTargets(targets: RouteTarget[]): RouteTarget[] {
+  const seen = new Map<string, RouteTarget>();
+  for (const target of targets) {
+    const key = `${target.kind}:${target.name}`;
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, target);
+      continue;
+    }
+    if (existing.description !== target.description) {
+      throw new Error(
+        `Duplicate route target "${key}" with conflicting descriptions found under the context ` +
+          `directory. This usually means two source files resolve to the same routable name/kind.\n` +
+          `  - ${JSON.stringify(existing.description)}\n  - ${JSON.stringify(target.description)}`,
+      );
+    }
+  }
+  return [...seen.values()];
+}
+
 /** Resolves the router context from a plugin (`plugins/core-claude`) or instructions
  * (`instructions/r3/core`) directory — both share the same `skills/*\/SKILL.md` +
  * `workflows/*.md` shape. Returns the `rosetta` skill body (router persona) plus every routable
@@ -101,7 +136,7 @@ export function loadRouterContext(contextDir: string): RouterContext {
   }
   const { targets: skillTargets, rosettaSkillBody } = loadSkillTargets(contextDir);
   const workflowTargets = loadWorkflowTargets(contextDir);
-  const targets = [...skillTargets, ...workflowTargets].sort(
+  const targets = dedupeTargets([...skillTargets, ...workflowTargets]).sort(
     (a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name),
   );
   if (targets.length === 0) {

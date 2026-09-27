@@ -95,6 +95,10 @@ async function runAttempt(
     const latencyMs = Date.now() - start;
     const actual = parseSelection(response);
     const correct = !!actual && actual.kind === routeCase.expect.kind && actual.name === routeCase.expect.name;
+    // A forbidden pick is already incorrect (it isn't `expect`); this just flags *which* incorrect
+    // attempts landed on a target the case explicitly called out, for reporting.
+    const forbiddenHit =
+      !correct && !!actual && (routeCase.forbid ?? []).includes(targetKey(actual.kind, actual.name));
     return {
       caseId: routeCase.id,
       repetition,
@@ -102,6 +106,7 @@ async function runAttempt(
       expected: routeCase.expect,
       actual,
       correct,
+      forbiddenHit,
       latencyMs,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
@@ -115,6 +120,10 @@ async function runAttempt(
       expected: routeCase.expect,
       actual: null,
       correct: false,
+      forbiddenHit: false,
+      // API/model failure (bad request, forced tool_choice or thinking:disabled rejected, etc.) —
+      // never a routing mistake, so callers must score it separately from an incorrect pick
+      // (see buildRouteReport's erroredAttempts / accuracy denominator).
       error: err instanceof Error ? err.message : String(err),
       latencyMs: Date.now() - start,
       inputTokens: 0,

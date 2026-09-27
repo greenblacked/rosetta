@@ -59,7 +59,9 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: src/rosettify-plugins/package-lock.json
+          cache-dependency-path: |
+            src/hooks/package-lock.json
+            src/rosettify-plugins/package-lock.json
 
       # Inputs are validated and copied to plain shell env vars here (never interpolated as
       # ${{ ... }} directly inside a run: block below) to keep every later `run:` step free of
@@ -73,28 +75,37 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Untrusted workflow_dispatch string inputs may contain newlines or other control
+          # characters; never echo them back verbatim in an ::error:: annotation (that string is
+          # interpreted as a workflow command, so a newline can inject an unrelated command). Every
+          # failure message below is therefore fixed text, never the raw input value.
           if [[ -z "${ORG_DOMAIN_INPUT}" ]]; then
             echo "::error::org_domain input is required"
             exit 1
           fi
           if ! [[ "${ORG_DOMAIN_INPUT}" =~ ^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$ ]]; then
-            echo "::error::org_domain must be one or more comma-separated [A-Za-z0-9_-]+ names, got: ${ORG_DOMAIN_INPUT}"
+            echo "::error::org_domain must be one or more comma-separated [A-Za-z0-9_-]+ names"
             exit 1
           fi
-          if [[ "${ORG_DOMAIN_INPUT}" == *"core"* ]]; then
-            echo "::error::org_domain must not include \"core\" — it is always layered first automatically"
-            exit 1
-          fi
+          # Reject "core" only as an exact domain entry (comma-separated), never a substring match —
+          # a substring check would also wrongly reject names like "score" or "hardcore".
+          IFS=',' read -ra org_domain_entries <<< "${ORG_DOMAIN_INPUT}"
+          for org_domain_entry in "${org_domain_entries[@]}"; do
+            if [[ "${org_domain_entry}" == "core" ]]; then
+              echo "::error::org_domain must not include \"core\" as one of its entries — it is always layered first automatically"
+              exit 1
+            fi
+          done
 
           release="${RELEASE_INPUT:-r3}"
           if ! [[ "${release}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            echo "::error::release must be a single [A-Za-z0-9_-]+ token, got: ${release}"
+            echo "::error::release must be a single [A-Za-z0-9_-]+ token"
             exit 1
           fi
 
           profile="${PROFILE_INPUT:-}"
           if [[ -n "${profile}" ]] && ! [[ "${profile}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            echo "::error::profile must be a single [A-Za-z0-9_-]+ token, got: ${profile}"
+            echo "::error::profile must be a single [A-Za-z0-9_-]+ token"
             exit 1
           fi
 
@@ -104,6 +115,20 @@ jobs:
             echo "profile=${profile}"
             echo "deterministic_hooks=${DETERMINISTIC_HOOKS_INPUT:-false}"
           } >> "${GITHUB_ENV}"
+
+      # Hooks must be built BEFORE rosettify-plugins runs, and before the deterministic-hooks
+      # branch of it: pluginSyncBundles (src/rosettify-plugins/src/plugin-processors/
+      # plugin-sync-bundles.ts) reads <hooksSource>/dist/bundles/<target>/*.js and silently no-ops
+      # when that dist dir doesn't exist yet, which otherwise ships a hooks.json referencing .js
+      # bundle files that were never copied. Mirrors the plugin-drift job in
+      # .github/workflows/ci-release-guard.yml.
+      - name: Install hooks dependencies
+        working-directory: src/hooks
+        run: npm ci
+
+      - name: Build hooks bundles
+        working-directory: src/hooks
+        run: npm run build:quiet --silent
 
       - name: Install rosettify-plugins dependencies
         working-directory: src/rosettify-plugins
@@ -128,8 +153,69 @@ jobs:
           fi
           node src/rosettify-plugins/dist/cli.js "${args[@]}"
 
+      # Belt-and-braces on top of building hooks first above: even with hooks built, a hooks.json
+      # can still reference a bundle .js file that was never copied for that specific target (e.g.
+      # an unknown/renamed bundleSource), and plugin-sync-bundles.ts's own hard error there does
+      # not fail the CLI's exit code. So when deterministic hooks are on, fail this job outright if
+      # any generated hooks.json references a bundle .js file that isn't actually on disk next to
+      # it, instead of silently shipping a plugin with a broken hook.
+      - name: Verify deterministic hook bundles
+        if: env.deterministic_hooks == 'true'
+        run: |
+          set -euo pipefail
+          python3 - "${RUNNER_TEMP}/org-plugins-out" <<'PYEOF'
+          import os
+          import sys
+
+          BUNDLE_FILENAMES = (
+              "dangerous-actions.js",
+              "codemap-refresh.js",
+              "lint-format-advisory.js",
+              "loose-files.js",
+              "md-file-advisory.js",
+              "read-once.js",
+              "read-once-reset.js",
+          )
+
+          output_root = sys.argv[1]
+          missing = []
+
+          for root, _dirs, files in os.walk(output_root):
+              if "hooks.json" not in files:
+                  continue
+              hooks_path = os.path.join(root, "hooks.json")
+              rel = os.path.relpath(hooks_path, output_root)
+              target_name = rel.split(os.sep, 1)[0]
+              target_dir = os.path.join(output_root, target_name)
+
+              try:
+                  content = open(hooks_path, encoding="utf-8").read()
+              except OSError as err:
+                  missing.append(f"{hooks_path}: could not read ({err})")
+                  continue
+
+              referenced = {name for name in BUNDLE_FILENAMES if name in content}
+              if not referenced:
+                  continue
+
+              present = set()
+              for t_root, _t_dirs, t_files in os.walk(target_dir):
+                  present.update(t_files)
+
+              for name in sorted(referenced - present):
+                  missing.append(f"{hooks_path} references \"{name}\" but no such file exists under {target_dir}")
+
+          if missing:
+              print("::error::deterministic hooks are on, but the following hooks.json files reference bundle .js files that were never built/copied:")
+              for line in missing:
+                  print(f"  - {line}")
+              sys.exit(1)
+
+          print(f"Verified: every hooks.json-referenced bundle file exists under {output_root}")
+          PYEOF
+
       - name: Upload org plugin set artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: org-plugins-${{ github.run_id }}
           path: ${{ runner.temp }}/org-plugins-out

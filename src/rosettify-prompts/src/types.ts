@@ -204,8 +204,10 @@ export interface RouteCaseConfig {
   id: string;
   prompt: string;
   expect: { kind: RouteTargetKind; name: string };
-  /** Documentation-only: target keys ("kind:name") this case is expected NOT to select. Not scored
-   * separately — picking a forbidden target that isn't `expect` is already an incorrect attempt. */
+  /** Target keys ("kind:name") this case must NOT select. Any of these is already an incorrect
+   * attempt (it isn't `expect`), but landing on one is scored/reported distinctly (`forbiddenHit`)
+   * so a confusable-target regression (e.g. a description that keeps stealing traffic) is visible
+   * without having to read the confusion matrix. */
   forbid?: string[];
 }
 
@@ -224,6 +226,11 @@ export interface RouteAttemptResult {
   /** null when the model's forced tool call was missing or malformed (still scored as incorrect). */
   actual: { kind: RouteTargetKind; name: string } | null;
   correct: boolean;
+  /** True when `actual` (already incorrect) matches one of the case's `forbid` entries. */
+  forbiddenHit: boolean;
+  /** A failed API call (after retries), a model that rejects forced tool_choice/thinking:disabled,
+   * etc. Always incorrect, but excluded from the accuracy denominator and reported separately —
+   * an API/model failure is not a routing mistake. */
   error?: string;
   latencyMs: number;
   inputTokens: number;
@@ -235,9 +242,15 @@ export interface RouteCaseSummary {
   caseId: string;
   prompt: string;
   expected: { kind: RouteTargetKind; name: string };
+  /** Total attempts for this case, including errored ones. */
   attempts: number;
+  /** Errored attempts for this case (excluded from `accuracy`'s denominator). */
+  errored: number;
   correct: number;
+  /** correct / (attempts - errored); 0 when every attempt for this case errored. */
   accuracy: number;
+  /** Attempts that landed on one of this case's `forbid` targets. */
+  forbiddenHits: number;
   /** "kind:name" (or "(no selection)"/"(error)") -> attempt count for this case. */
   actualBreakdown: Record<string, number>;
 }
@@ -255,17 +268,29 @@ export interface RouteBaselineComparison {
   delta: number;
   maxAllowedDrop: number;
   regression: boolean;
+  /** Reasons the baseline looks like it was run against a different setup (different model or
+   * case set). Non-empty only when `--force-baseline` was used to compare anyway. */
+  incompatibilities?: string[];
 }
 
 export interface RouteReport {
   generatedAt: string;
   contextDir: string;
   model: string;
+  /** Number of attempts run per case (RouteConfig.repetitions at run time). */
+  repetitions: number;
+  /** Stable hash of the sorted, de-duplicated set of case ids scored in this report — used to
+   * detect a baseline run against a different set of routing cases. */
+  caseIdsHash: string;
   targets: RouteTarget[];
   cases: RouteCaseSummary[];
   attempts: RouteAttemptResult[];
+  /** Total attempts, including errored ones. */
   totalAttempts: number;
   correctAttempts: number;
+  /** Attempts that failed (API error after retries, etc.); excluded from `accuracy`'s denominator. */
+  erroredAttempts: number;
+  /** correctAttempts / (totalAttempts - erroredAttempts); 0 when every attempt errored. */
   accuracy: number;
   confusionMatrix: RouteConfusionEntry[];
   baseline?: RouteBaselineComparison;
