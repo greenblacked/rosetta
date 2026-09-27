@@ -1,6 +1,6 @@
 /**
  * specs command E2E tests — spawns the built rosettify binary as a subprocess.
- * Covers a realistic flow across all 16 subcommands plus help.
+ * Covers a realistic flow across all 17 subcommands plus help.
  *
  * Requires: npm run build must have been run first.
  */
@@ -78,13 +78,13 @@ const ITEM_1 = JSON.stringify({
 // ---------------------------------------------------------------------------
 
 describe("CLI — help specs", () => {
-  it("rosettify help specs returns specs detail with all 16 subcommands", () => {
+  it("rosettify help specs returns specs detail with all 17 subcommands", () => {
     const r = run(["help", "specs"]);
     expect(r.status).toBe(0);
     expect((r.json as any).ok).toBeUndefined();
     const res = r.json as { name: string; subcommands: { name: string }[]; schemas: unknown; limits: unknown; query_notation: unknown };
     expect(res.name).toBe("specs");
-    expect(res.subcommands).toHaveLength(16);
+    expect(res.subcommands).toHaveLength(17);
     expect(res.schemas).toBeDefined();
     expect(res.limits).toBeDefined();
     expect(res.query_notation).toBeDefined();
@@ -461,4 +461,55 @@ describe("CLI — concurrent first-create (A2 / FR-SPECS-0002)", () => {
     const leftovers = fs.readdirSync(path.dirname(file)).filter((n) => n.includes(".tmp-"));
     expect(leftovers).toEqual([]);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// specs trace — FR-SPECS-0027 (CLI E2E)
+// ---------------------------------------------------------------------------
+
+describe("CLI — specs trace", () => {
+  it("reports uncited, cited, and orphan ids scanning a source directory", () => {
+    const file = specsFile();
+    const add = run(["specs", "add", file, ITEM_1, "--system", "checkout"]);
+    expect(add.status).toBe(0);
+    run(["specs", "approve", file, "FR-CHK-0001"]);
+
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "cart.ts"), "// implements FR-CHK-0001\n// see also FR-CHK-9999\n");
+
+    const result = run(["specs", "trace", file, "--source", srcDir]);
+    expect(result.status).toBe(0);
+    const payload = result.json as {
+      specs: { id: string; code_refs: unknown[] }[];
+      uncited: string[];
+      orphans: { id: string }[];
+    };
+    expect(payload.uncited).toEqual([]);
+    expect(payload.specs.find((s) => s.id === "FR-CHK-0001")!.code_refs).toHaveLength(1);
+    expect(payload.orphans.map((o) => o.id)).toEqual(["FR-CHK-9999"]);
+  });
+
+  it("exits 0 without --strict even when findings exist", () => {
+    const file = specsFile();
+    run(["specs", "add", file, ITEM_1, "--system", "checkout"]);
+    run(["specs", "approve", file, "FR-CHK-0001"]);
+    const result = run(["specs", "trace", file, "--source", tmpDir]);
+    expect(result.status).toBe(0);
+    expect((result.json as { uncited: string[] }).uncited).toEqual(["FR-CHK-0001"]);
+  });
+
+  it("exits 1 with --strict when findings exist", () => {
+    const file = specsFile();
+    run(["specs", "add", file, ITEM_1, "--system", "checkout"]);
+    run(["specs", "approve", file, "FR-CHK-0001"]);
+    const result = run(["specs", "trace", file, "--source", tmpDir, "--strict"]);
+    expect(result.status).toBe(1);
+  });
+
+  it("returns specs_not_found for a missing document", () => {
+    const result = run(["specs", "trace", specsFile("nope.json")]);
+    expect(result.status).toBe(1);
+    expect(result.json).toEqual({ error: "specs_not_found" });
+  });
 });

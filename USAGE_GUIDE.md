@@ -423,6 +423,78 @@ Authors or adapts prompts for AI coding agents. Rosetta keeps orchestration thin
 
 </details>
 
+<details>
+<summary><b>Delivery</b></summary>
+
+Drafts a commit message, PR description, CHANGELOG entry, and release notes from an already-approved change, then executes only the exact git/PR actions you name.
+
+**Use when:** you have an approved change (your own `coding-flow` output, an approved batch, or a tag range) and need commit/PR/CHANGELOG/release-note text. Not for writing, reviewing, or testing code.
+
+**Phases:**
+1. Detect conventions — read the repo's commit style, PR template, CHANGELOG format, and branch naming
+2. Draft — draft commit message(s), PR description, CHANGELOG entry, and release notes, each claim traced to plan, specs, diff, or requirement ID
+3. User review — you approve the drafts and separately name which actions to execute
+4. Execute — perform only the named git/PR/CHANGELOG actions, gated by `dangerous-actions`
+5. Record — update `agents/IMPLEMENTATION.md` and the CHANGELOG if approved
+
+**Expect:** an executor and engineer subagent, no push/PR/tag without an explicit named approval, and repo conventions used over generic defaults. Your responsibility is to approve drafts and name exactly which actions to execute.
+
+```
+/delivery-flow Draft the commit message and PR description for this change
+/delivery-flow Prepare release notes for everything merged since the last tag
+```
+
+</details>
+
+<details>
+<summary><b>Change Review</b></summary>
+
+Reviews a teammate's PR, branch, or diff against project context, architecture, patterns, and requirements. Read-only by default.
+
+**Use when:** reviewing a change you did not author, before merge or as a second pass. Not for reviewing your own `coding-flow` output (already covered there) or applying fixes — those hand off to `coding-flow`.
+
+**Phases:**
+1. Collect change — gather the diff, PR/branch description, and linked tickets
+2. Review — dispatch per-concern review (correctness, architecture/pattern conformance, tests, docs) in parallel
+3. Validate — optionally build and run affected tests locally for evidence
+4. Report — consolidate findings into one P0-P3 report with file:line and suggested fix
+5. User review — you choose which findings to post, if any
+6. Post — post only the findings you approved, gated by `dangerous-actions`
+
+**Expect:** reviewer and validator subagents, high-confidence findings unless you ask for a thorough pass, and nothing posted without your explicit selection. Your responsibility is to select what gets posted and to route approved fixes to `coding-flow`.
+
+```
+/change-review-flow Review PR 123 against our architecture and patterns
+/change-review-flow Review this branch for correctness and test coverage, local only, no posting
+```
+
+</details>
+
+<details>
+<summary><b>Dependency Upgrade</b></summary>
+
+Batches dependency version bumps and CVE patches, ordered by dependency graph, with per-batch build/test validation and a rollback path.
+
+**Use when:** bumping library/framework versions within a compatible major line (including a framework minor/patch bump, e.g. Spring Boot 3.2 to 3.5) or patching a CVE. Not for a major-version, language/framework rewrite, or re-architecture change — use `modernization-flow` for those.
+
+**Phases:**
+1. Inventory — read `docs/DEPENDENCIES.md`, manifests, lockfiles, and any advisory/CVE input
+2. Research — release notes, breaking changes, migration guides, and transitive conflicts per target version
+3. Plan — order updates by dependency graph into batches, each with a rollback note
+4. User review — you approve the batch sequence
+5. Implement batch — bump and minimally migrate one approved batch, build, and test
+6. Validate batch — re-scan for the patched advisory before the next batch starts
+7. Record — update `docs/DEPENDENCIES.md` and `docs/TECHSTACK.md`, then offer a `delivery-flow` handoff
+
+**Expect:** architect, engineer, and validator subagents, one batch at a time, and a revert on any batch failure. Your responsibility is to approve the batch plan and its rollback path.
+
+```
+/dependency-upgrade-flow Upgrade Spring Boot 3.2 to 3.5
+/dependency-upgrade-flow Patch CVE-2025-XXXX in lodash across all services
+```
+
+</details>
+
 ### Always Active
 
 Every request benefits from these regardless of workflow.

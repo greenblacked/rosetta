@@ -136,7 +136,14 @@ export const hasMarkerBeforeBoundary = (
   return false;
 };
 
-export const walkUp = (startDir: string, marker: string, maxLevels = 10): string | null => {
+// Default raised from 10 -> 64: 10 levels is shallow enough that a deeply-nested checkout
+// (monorepo package several levels below the repo root) can walk out of levels before ever
+// reaching `.git`, silently falling back to `cwd` for repo-root-relative resolution (e.g. the
+// F3-3 project policy path, or the F3-4 audit repo hash). The loop still stops the instant it
+// hits the filesystem root (`parent === dir`), so raising this cap costs at most a few extra
+// `fs.existsSync` calls on the (rare) path that doesn't find `.git` at all — it does not change
+// behavior for any repo shallower than 64 levels, which is effectively all of them.
+export const walkUp = (startDir: string, marker: string, maxLevels = 64): string | null => {
   let dir = startDir;
   debugLogBranch('path-utils', 'walk-up-start', {
     startDir,

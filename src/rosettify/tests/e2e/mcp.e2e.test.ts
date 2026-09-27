@@ -762,3 +762,79 @@ describe("MCP — specs add -> get round trip", () => {
     expect((r.payload as { error: string }).error).toContain("unknown_command");
   });
 });
+
+// ---------------------------------------------------------------------------
+// tools/call — specs trace (FR-SPECS-0027)
+// ---------------------------------------------------------------------------
+
+describe("MCP — specs trace", () => {
+  it("reports uncited and orphan ids identically to the CLI's shape", async () => {
+    const file = specsFile("trace.json");
+    await client.callTool("specs", {
+      subcommand: "add",
+      specs_file: file,
+      system: "checkout",
+      data: {
+        id: "FR-CHK-0001",
+        type: "FR",
+        title: "Cart total",
+        statement: "When the cart changes, the system shall recompute the total.",
+        source: "User",
+        priority: "Must",
+        verification: "Test",
+        acceptance: [{ ears: "event", when: "an item is added", system: "the checkout service", shall: "recompute the total" }],
+      },
+    });
+    await client.callTool("specs", { subcommand: "approve", specs_file: file, ids: ["FR-CHK-0001"] });
+
+    const srcDir = path.join(tmpDir, "trace-src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "cart.ts"), "// FR-CHK-0001\n");
+
+    const res = await client.callTool("specs", { subcommand: "trace", specs_file: file, source_paths: [srcDir] });
+    expect(res.isError).toBe(false);
+    const payload = res.payload as { uncited: string[]; orphans: unknown[] };
+    expect(payload.uncited).toEqual([]);
+    expect(payload.orphans).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tools/call — doctor (FR-DOC-0001)
+// ---------------------------------------------------------------------------
+
+describe("MCP — doctor tool registration and call", () => {
+  it("tools/list includes doctor", async () => {
+    const tools = await client.listTools();
+    expect(tools.map((t) => t.name)).toContain("doctor");
+  });
+
+  it("doctor returns a checks array and a summary with matching counts", async () => {
+    const res = await client.callTool("doctor", { root: tmpDir });
+    expect(res.isError).toBe(false);
+    const payload = res.payload as {
+      root: string;
+      checks: { id: string; status: string }[];
+      summary: { ok_count: number; warn_count: number; fail_count: number };
+    };
+    expect(payload.root).toBe(tmpDir);
+    expect(Array.isArray(payload.checks)).toBe(true);
+    expect(payload.summary.ok_count + payload.summary.warn_count + payload.summary.fail_count).toBe(
+      payload.checks.length,
+    );
+  });
+
+  it("doctor with an unresolvable root returns root_not_found", async () => {
+    const res = await client.callTool("doctor", { root: path.join(tmpDir, "does-not-exist") });
+    expect(res.isError).toBe(true);
+    expect((res.payload as { error: string }).error).toBe("root_not_found");
+  });
+
+  it("help with subcommand=doctor returns doctor detail", async () => {
+    const { payload, isError } = await client.callTool("help", { subcommand: "doctor" });
+    expect(isError).toBe(false);
+    const r = payload as { name: string; schemas: unknown };
+    expect(r.name).toBe("doctor");
+    expect(r.schemas).toBeDefined();
+  });
+});

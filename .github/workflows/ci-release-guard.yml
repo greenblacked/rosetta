@@ -101,6 +101,20 @@ jobs:
           fi
           echo "plugins/ is in sync."
 
+      # F3-8 (build-org-plugins.yml) regression checks: not exercised by anything else above (that
+      # workflow is workflow_dispatch-only and never runs in CI), so this job — the closest existing
+      # gate to the plugin-generation path — is the one place they run in CI.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest/PyYAML for workflow regression tests
+        run: pip install pytest pyyaml
+
+      - name: Test build-org-plugins.yml (F3-8)
+        run: pytest .github/scripts/test_build_org_plugins_workflow.py -v
+
   npm-audit:
     name: npm audit (${{ matrix.package }})
     runs-on: ubuntu-latest

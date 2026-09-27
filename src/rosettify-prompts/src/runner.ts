@@ -36,9 +36,9 @@ function sleep(ms: number): Promise<void> {
 /** Bounded-concurrency gate shared by ALL API work (variant conversations AND judge calls), so the
  * whole batch respects `concurrency` while groups pipeline independently — a repetition whose
  * variants finish early gets judged while other repetitions are still generating. */
-type Limiter = <T>(fn: () => Promise<T>) => Promise<T>;
+export type Limiter = <T>(fn: () => Promise<T>) => Promise<T>;
 
-function createLimiter(max: number): Limiter {
+export function createLimiter(max: number): Limiter {
   let active = 0;
   const queue: Array<() => void> = [];
   const pump = (): void => {
@@ -77,7 +77,9 @@ function computeTextMetrics(text: string): TextMetrics {
   return { chars, words, unicodeSymbols };
 }
 
-async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
+/** Exported for reuse by other commands (e.g. `route`) that need the same transient-error retry
+ * policy as `bench` without duplicating it. */
+export async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
   let attempt = 0;
   for (;;) {
     try {

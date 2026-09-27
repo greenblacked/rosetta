@@ -1,0 +1,6 @@
+{
+  "_comment": "Rosetta enterprise rollout template for GitHub Copilot in VS Code. `chat.plugins.marketplaces` is verified against instructions/r3/core/configure/github-copilot.md and PLUGINS.md in this repo (see docs/enterprise/README.md). Deploy centrally via a VS Code Settings Sync profile, a workspace .vscode/settings.json committed to every repo, or your device-management tool's VS Code policy channel — the policy/Group-Policy delivery mechanism itself is NOT verified in this repo's docs; confirm the exact policy key against current VS Code / GitHub Copilot vendor docs before relying on it for enforcement.",
+  "chat.plugins.marketplaces": [
+    "https://github.com/your-org/rosetta-marketplace-mirror"
+  ]
+}

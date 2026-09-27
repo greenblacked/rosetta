@@ -249,3 +249,43 @@ export interface SpecMigrateResult {
   warnings: SpecFinding[];
   skipped: SpecSkipped[];
 }
+
+// ---------------------------------------------------------------------------
+// FR-SPECS-0027 — trace result shapes.
+// ---------------------------------------------------------------------------
+
+/** FR-SPECS-0027 — one citation location. */
+export interface SpecTraceRef {
+  file: string;
+  line: number;
+}
+
+/** FR-SPECS-0027 — one defined id's citation summary. */
+export interface SpecTraceEntry {
+  id: string;
+  status: StatusEnum;
+  code_refs: SpecTraceRef[];
+  test_refs: SpecTraceRef[];
+}
+
+/** FR-SPECS-0027 — one id matched while scanning that the document does not define. */
+export interface SpecTraceOrphan {
+  id: string;
+  refs: SpecTraceRef[];
+}
+
+/** FR-SPECS-0027 — cmdTrace's result. `violated` is strict-mode-only exit-code signaling
+ * (kept out of `uncited`/`orphans`, which never change shape based on `strict`). `skipped_files`
+ * counts every file excluded by either bound (oversize, or cut by the file-count limit);
+ * `truncated` is true specifically when the file-count or directory-count bound was hit, meaning
+ * the scan did not finish visiting the whole tree — `uncited`/`orphans` are then a lower bound,
+ * not a definitive account, and `violated` treats truncation itself as a strict-mode failure. */
+export interface SpecTraceResult {
+  specs: SpecTraceEntry[];
+  uncited: string[];
+  orphans: SpecTraceOrphan[];
+  scanned_files: number;
+  skipped_files: number;
+  truncated: boolean;
+  violated: boolean;
+}

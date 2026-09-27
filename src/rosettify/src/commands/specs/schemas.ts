@@ -338,6 +338,55 @@ const specMigrateResultSchema = {
   },
 };
 
+// SpecTraceRef — nested shape for SpecTraceResult citations (output.ts)
+const specTraceRefSchema = {
+  type: "object" as const,
+  description: "One citation location",
+  properties: {
+    file: { type: "string" as const, description: "path relative to the process's current working directory" },
+    line: { type: "integer" as const, description: "1-based line number" },
+  },
+};
+
+// SpecTraceEntry — nested shape for SpecTraceResult.specs (output.ts)
+const specTraceEntrySchema = {
+  type: "object" as const,
+  description: "One defined id's citation summary",
+  properties: {
+    id: { type: "string" as const },
+    status: { type: "string" as const, enum: STATUSES as unknown as string[] },
+    code_refs: { type: "array" as const, items: { $ref: "SpecTraceRef" as const } },
+    test_refs: { type: "array" as const, items: { $ref: "SpecTraceRef" as const } },
+  },
+};
+
+// SpecTraceOrphan — nested shape for SpecTraceResult.orphans (output.ts)
+const specTraceOrphanSchema = {
+  type: "object" as const,
+  description: "One id matched while scanning that the document does not define",
+  properties: {
+    id: { type: "string" as const },
+    refs: { type: "array" as const, items: { $ref: "SpecTraceRef" as const } },
+  },
+};
+
+// SpecTraceResult — trace (output.ts)
+const specTraceResultSchema = {
+  type: "object" as const,
+  description:
+    "Result of trace. uncited: Approved/Modified ids with zero citations. orphans: ids matched while " +
+    "scanning that this document does not define. violated is strict-mode-only exit-code signaling and never " +
+    "changes uncited/orphans.",
+  properties: {
+    specs: { type: "array" as const, items: { $ref: "SpecTraceEntry" as const } },
+    uncited: { type: "array" as const, items: { type: "string" as const } },
+    orphans: { type: "array" as const, items: { $ref: "SpecTraceOrphan" as const } },
+    scanned_files: { type: "integer" as const },
+    skipped_files: { type: "integer" as const, description: "excluded by the file-count or file-size bound" },
+    violated: { type: "boolean" as const },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Per-subcommand input schemas (FR-SPECS §9/§14) — every field also lives on CommandInput.
 // ---------------------------------------------------------------------------
@@ -467,6 +516,20 @@ export const migrateInputSchema = {
 };
 export const migrateOutputSchema = { $ref: "SpecMigrateResult" as const };
 
+export const traceInputSchema = {
+  type: "object" as const,
+  properties: {
+    specs_file: specsFileProp,
+    source_paths: { type: "array" as const, items: { type: "string" as const }, description: "Source directories to scan (default: the src and tests directories under cwd, or cwd itself)" },
+    id_regex: { type: "string" as const, description: "Override the default id-matching regular expression" },
+    id_prefixes: { type: "array" as const, items: { type: "string" as const }, description: "Allowed id prefixes (default: FR, NFR, INT, DATA)" },
+    tests_glob: { type: "string" as const, description: "Glob/substring pattern classifying a scanned file as a test file" },
+    extensions: { type: "array" as const, items: { type: "string" as const }, description: "File extensions to scan" },
+    strict: { type: "boolean" as const, description: "CLI exits non-zero when any uncited/orphan finding exists" },
+  },
+};
+export const traceOutputSchema = { $ref: "SpecTraceResult" as const };
+
 // FR-HELP-0002 — per-subcommand schema dict, keyed by subcommand name
 export const specsSubcommandSchemas = {
   add: { input: addInputSchema, output: addOutputSchema },
@@ -485,6 +548,7 @@ export const specsSubcommandSchemas = {
   render: { input: renderInputSchema, output: renderOutputSchema },
   info: { input: infoInputSchema, output: infoOutputSchema },
   migrate: { input: migrateInputSchema, output: migrateOutputSchema },
+  trace: { input: traceInputSchema, output: traceOutputSchema },
 } as const;
 
 /**
@@ -510,6 +574,7 @@ export const specsSchemasDict: Record<string, unknown> = {
   SpecRenderInput: renderInputSchema,
   SpecInfoInput: infoInputSchema,
   SpecMigrateInput: migrateInputSchema,
+  SpecTraceInput: traceInputSchema,
   // Result schemas keyed by exported type name
   SpecWriteResult: specWriteResultSchema,
   SpecLifecycleResult: specLifecycleResultSchema,
@@ -523,6 +588,10 @@ export const specsSchemasDict: Record<string, unknown> = {
   SpecRenderResult: specRenderResultSchema,
   SpecInfoResult: specInfoResultSchema,
   SpecMigrateResult: specMigrateResultSchema,
+  SpecTraceResult: specTraceResultSchema,
+  SpecTraceRef: specTraceRefSchema,
+  SpecTraceEntry: specTraceEntrySchema,
+  SpecTraceOrphan: specTraceOrphanSchema,
   // Shared reusable data shapes (FR-SPECS-0050)
   Spec: specSchema,
   AcceptanceCriterion: acceptanceCriterionSchema,

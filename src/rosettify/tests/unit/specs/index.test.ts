@@ -31,8 +31,8 @@ describe("runSpecs — no subcommand returns help content", () => {
     const res = result.result as { subcommands?: unknown[]; name?: string };
     expect(res.name).toBe("specs");
     expect(Array.isArray(res.subcommands)).toBe(true);
-    // FR-SPECS-0060 — 16 subcommand entries
-    expect((res.subcommands as unknown[]).length).toBe(16);
+    // FR-SPECS-0060 — 17 subcommand entries
+    expect((res.subcommands as unknown[]).length).toBe(17);
   });
 });
 
@@ -276,5 +276,35 @@ describe("specsToolDef — metadata", () => {
 
   it("forwards specsHelpContent as helpContent", () => {
     expect(specsToolDef.helpContent).toBeDefined();
+  });
+});
+
+describe("runSpecs — trace (FR-SPECS-0027)", () => {
+  it("dispatches to cmdTrace with the trace-specific fields forwarded", async () => {
+    const file = specsFile();
+    saveSpecs(file, makeDoc({ specs: [makeSpec({ id: "FR-CHK-0001", status: "Approved" })] }));
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "a.ts"), "FR-CHK-0001\n");
+
+    const result = await specsToolDef.run({
+      subcommand: "trace",
+      specs_file: file,
+      source_paths: [srcDir],
+      id_prefixes: ["FR"],
+      tests_glob: "nope",
+      extensions: [".ts"],
+      strict: true,
+    });
+    expect(result.ok).toBe(true);
+    const payload = result.result as { uncited: string[]; violated: boolean };
+    expect(payload.uncited).toEqual([]);
+    expect(payload.violated).toBe(false);
+  });
+
+  it("returns missing specs_file with include_help when specs_file is absent", async () => {
+    const result = await specsToolDef.run({ subcommand: "trace" });
+    expect(result.ok).toBe(false);
+    expect(result.include_help).toBe(true);
   });
 });
