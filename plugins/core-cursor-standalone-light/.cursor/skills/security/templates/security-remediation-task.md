@@ -11,8 +11,16 @@
 ## Scope and references
 
 - Affected scope:
-- Finding IDs:
 - Report/evidence references:
+
+## Findings
+
+| Finding ID | Severity | Location |
+|---|---|---|
+
+## Reproduction
+
+<Minimum steps to observe the finding; source of truth for the "reproduce before fix" gate.>
 
 ## Constraints
 
@@ -24,8 +32,12 @@
 
 ## Acceptance criteria
 
-- <Observable completion criterion>
+- <Observable completion criterion: finding reproduced, fixed, and closed by a re-run of `security-flow-deterministic-gates.md` scoped to this task>
 
 ## Residual risk
 
 <Known risk remaining after this task.>
+
+## Remediation handoff
+
+USE FLOW `coding-flow.md` with this file as the security remediation artifact input. Requires user approval per `hitl`.

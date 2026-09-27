@@ -71,7 +71,7 @@ Recommend enterprise-safe targets, environment, exclusions, coverage, limits, st
 5. Inspect and test — execute authorized activities; capture evidence.
 6. Normalize and triage — preserve sources; correlate, verify, prioritize.
 7. Independent review — challenge coverage, evidence, safety, conclusions.
-8. Report and package — sanitize outputs; approve INDEX; emit task inputs.
+8. Report and package — sanitize outputs; approve INDEX; emit task inputs; offer the `coding-flow.md` remediation handoff.
 
 After separate lifecycle remediation, require a new clean deterministic run.
 
@@ -105,7 +105,7 @@ With storage approval, write sanitized artifacts under `docs/security/<run-id>/`
 - `tasks/INDEX.md`
 - `tasks/<task-id>.md`
 
-Group tasks by remediation area plus shared root cause/fix strategy, never by location. One task file is one concise, one-shot input for a later user-invoked coding session. Never invoke, coordinate, monitor, or validate remediation.
+Group tasks by remediation area plus shared root cause/fix strategy, never by location. One task file is one concise, one-shot input for a later user-invoked coding session: it carries the finding id, severity, location, reproduction steps, and acceptance criteria, plus a remediation-handoff line naming `USE FLOW coding-flow.md`. Never invoke, coordinate, monitor, or validate remediation — offering the handoff is not starting it; the user invokes `coding-flow.md` separately.
 
 Without storage approval, return sanitized results without committing artifacts. Keep raw scanner output under `docs/security/<run-id>/raw/`; never commit it. Ask the user to review and commit; never commit or delete on their behalf.
 

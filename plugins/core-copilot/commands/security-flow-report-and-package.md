@@ -23,6 +23,7 @@ Phase 8. Final security phase; never starts downstream remediation.
 2. Recommend remediation groups
 3. Obtain INDEX approval
 4. Emit concise task files
+5. Offer remediation handoff
 </phase_steps>
 
 <prepare_package step="8.1" subagent="engineer" role="Security reporter and remediation-input designer" subagent_required_model="Claude Sonnet 5, GPT-5.6 Terra, Gemini 3.7 Flash">
@@ -46,14 +47,15 @@ Return the drafted INDEX marked pending-approval, with grouping rationale and tr
 <emit_tasks step="8.3" subagent="engineer" role="Concise coding-flow request author" subagent_required_model="Claude Sonnet 5, GPT-5.6 Terra, Gemini 3.7 Flash">
 
 1. Apply approved grouping exactly.
-2. Emit one concise `tasks/<task-id>.md` per one-shot group.
-3. Reference findings/report/evidence; never duplicate evidence.
+2. Emit one concise `tasks/<task-id>.md` per one-shot group; READ SKILL FILE `templates/security-remediation-task.md`.
+3. Fill its Findings table (finding id, severity, location) and Reproduction section per task; reference report/evidence for detail, never duplicate it.
 4. Record dependencies; never execute them.
 5. With storage approval, write under `docs/security/<run-id>/`.
 6. Otherwise return sanitized artifacts without committing.
 7. Keep raw scanner output in `docs/security/<run-id>/raw/`; never commit it.
 8. Ask the user to review and commit; never commit or delete on their behalf.
-9. Update `security-flow-state.md`.
+9. Present the remediation handoff: `USE FLOW coding-flow.md` with the approved task file as input; obtain explicit `hitl` approval before naming it as the next action.
+10. Update `security-flow-state.md`.
 
 </emit_tasks>
 
@@ -69,6 +71,7 @@ Return the drafted INDEX marked pending-approval, with grouping rationale and tr
 - INDEX approval is recorded.
 - Every finding is represented or dispositioned.
 - Tasks follow fix similarity, not location.
+- Every task lists its finding id, severity, location, reproduction, and acceptance criteria.
 - No task performs or invokes remediation.
 - Output contains no secret values.
 </validation_checklist>

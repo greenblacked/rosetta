@@ -107,15 +107,15 @@ Run task-adaptive security review through mandatory canonical subagents. End wit
 </independent_review>
 
 <report_and_package phase="8" applies="ALL" subagent="engineer" role="Security reporter and remediation-input designer" subagent_required_model="claude-sonnet-5, gpt-5.6-terra, gemini-3.7-flash, grok-4.6" type="HITL" must-be-subagent>
-- Purpose: Builds sanitized review artifacts and a proposed fix-similarity task INDEX, then emits approved task inputs. Ends without starting or managing remediation.
+- Purpose: Builds sanitized review artifacts and a proposed fix-similarity task INDEX, then emits approved task inputs and a remediation handoff. Ends without starting or managing remediation.
 - Input: accepted findings; evidence; storage policy; grouping constraints.
-- Output: sanitized review package and approved remediation-task package.
+- Output: sanitized review package, approved remediation-task package, remediation handoff record.
 - INVOKE SUBAGENT `engineer` to APPLY PHASE `security-flow-report-and-package.md` STEP 8.1 + build sanitized report/run/findings and the proposed fix-similarity INDEX.
 - Expect A: sanitized report/run/findings; proposed INDEX with grouping rationale.
 - Control: obtain INDEX approval/amendment via `hitl`.
-- INVOKE SUBAGENT `engineer` to APPLY PHASE `security-flow-report-and-package.md` STEP 8.3 + apply the approved INDEX and emit concise task-input files only.
-- Expect B: complete sanitized task package.
-- Control: verify coverage/storage; end without invoking or managing `coding-flow`.
+- INVOKE SUBAGENT `engineer` to APPLY PHASE `security-flow-report-and-package.md` STEP 8.3 + apply the approved INDEX, emit concise task-input files, and offer the remediation handoff.
+- Expect B: complete sanitized task package; per-task finding id/severity/location/reproduction/acceptance criteria; the handoff offer.
+- Control: verify coverage/storage; obtain separate handoff approval via `hitl` before naming `coding-flow.md`; end without invoking or managing `coding-flow`.
 </report_and_package>
 
 </workflow_phases>
@@ -145,7 +145,7 @@ Run task-adaptive security review through mandatory canonical subagents. End wit
 
 <completion>
 
-Complete only when required phases pass, sanitized outputs are returned or stored as approved, the task INDEX is approved/amended, and no downstream coding flow was started.
+Complete only when required phases pass, sanitized outputs are returned or stored as approved, the task INDEX is approved/amended, the remediation handoff is offered with each task's finding id/severity/location/reproduction/acceptance criteria, and no downstream coding flow was started.
 
 </completion>
 
