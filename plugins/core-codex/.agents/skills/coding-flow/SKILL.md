@@ -170,6 +170,7 @@ Validation: Each phase produces verifiable outputs; reviewer catches issues befo
 4. SMALL: orchestrator confirms build + tests pass.
 5. Recommended skills: `coding`, `debugging`, `sensitive-data`, `testing`, `dangerous-actions`
 6. Update `coding-flow-state.md`
+7. Offer handoff to `delivery-flow.md` for commit/PR/CHANGELOG drafting; do not invoke it.
 
 </final_validation>
 
