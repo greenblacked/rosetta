@@ -396,6 +396,27 @@ Website: builds the Jekyll website from `docs/web/`, deploys to GitHub Pages. Or
 
 **Plugin distribution.** The publish-instructions pipeline zips each plugin folder and attaches the archives to a GitHub Release alongside `instructions.zip`. See [Plugins](#plugins) for how plugin files are generated.
 
+**Release verification.** `publish-instructions.yml` generates `SHA256SUMS` over every release asset and uploads it to the release, and attests the assets with `actions/attest-build-provenance` (Sigstore keyless, GitHub OIDC). The attestation step runs with `continue-on-error: true` because attestations are unavailable on some plan/visibility combinations, so it never breaks publishing. Consumers verify a downloaded asset with:
+
+```
+sha256sum -c SHA256SUMS
+gh attestation verify <zip> --repo griddynamics/rosetta
+```
+
+### CI Release Guard
+
+`.github/workflows/ci-release-guard.yml` runs on `pull_request` and on `push` to `main`, path-filtered to `instructions/**`, `plugins/**`, `src/rosettify-plugins/**`, `src/hooks/**`, package manifests/lockfiles, and `requirements*.txt`/`pyproject.toml`. Three independent, read-only jobs:
+
+- **`plugin-drift`.** Builds `src/hooks` and `src/rosettify-plugins` from source (the local build, never `npx @latest`), regenerates `plugins/` in place for the r3 standard and lightweight profiles exactly as `scripts/pre_commit.py` does, then runs `git diff --exit-code -- plugins/`. A failure means `plugins/` is out of sync with `instructions/`; the job's error message gives the exact regenerate commands.
+- **`npm-audit`.** Runs `npm audit --omit=dev` per `src/*` package that carries a `package-lock.json`, via `.github/scripts/npm_audit_gate.py`. The gate fails the job only on a **`critical`** finding; `high`/`moderate` findings are reported as a warning annotation and a job-summary row, never blocking. This is a deliberate choice, not an oversight: at the time this gate was added, `curiocity` (`extract-zip`), `rosettify` (`fast-uri`/`hono`/`qs`) and `rosettify-plugins` (`js-yaml`) already carried unfixed `high` findings with no available fix. Gating on `high` would have made the check permanently red on day one and trained reviewers to ignore it; gating on `critical` blocks genuinely new severe issues without hiding the existing ones (they stay visible in the job summary).
+- **`pip-audit`.** Runs `pip-audit -r requirements.txt` (root), which covers `rosetta-cli` and `rosetta-mcp-server`'s editable installs plus `ims-mcp-server`'s only dependency (`rosetta-mcp`). This gate fails on **any** known vulnerability — the default — because it measured zero findings when added; there is no existing finding to carve out, unlike the npm gate above.
+
+`.github/dependabot.yml` covers the same surface on a weekly cadence: one `npm` entry per `src/*` package with a lockfile, `pip` entries for the root `requirements.txt` and each first-party Python package, and `github-actions` entries for `.github/workflows` and each composite action under `.github/actions/`. Each entry groups minor/patch upgrades and caps open PRs at 5.
+
+**Follow-ups deferred as maintainer policy decisions** (not implemented by this gate):
+- Making release tags (`vX.Y.Z`) immutable and refusing to force-move them, or requiring a version bump before instructions/plugins changes can reach `main` — both change contributor workflow and are a maintainer call, not a CI-scripting one.
+- SHA-pinning every third-party action repo-wide (`actions/setup-node`, `actions/setup-python`, `actions/attest-build-provenance`, etc.) — this PR only pins actions where a verified SHA already exists elsewhere in the repo (`actions/checkout`); the rest stay tag-pinned for consistency with the rest of the repo, and Dependabot's `github-actions` ecosystem keeps those tags current.
+
 ---
 
 ## Extension Points

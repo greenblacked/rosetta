@@ -1,0 +1,182 @@
+name: CI Release Guard
+
+# Gates the plugin release path (F2-1/F3-1, see docs/ARCHITECTURE.md#ci-release-guard):
+#   1. plugin-drift  - plugins/ must match what the LOCAL generator build produces
+#                       from instructions/ (r3 standard + lightweight profiles).
+#   2. npm-audit      - `npm audit --omit=dev` per src/* package with a lockfile.
+#   3. pip-audit      - `pip-audit` over the root Python requirements.
+#
+# Policy this workflow does NOT decide (deliberately out of scope, see PR):
+#   - moving/immutable release tags in publish-instructions.yml
+#   - a version-bump-required check
+# Both are maintainer policy calls, tracked as follow-ups.
+
+on:
+  pull_request:
+    paths:
+      - 'instructions/**'
+      - 'plugins/**'
+      - 'src/rosettify-plugins/**'
+      - 'src/hooks/**'
+      - 'src/*/package.json'
+      - 'src/*/package-lock.json'
+      - 'requirements*.txt'
+      - 'src/*/pyproject.toml'
+      - '.github/workflows/ci-release-guard.yml'
+      - '.github/scripts/npm_audit_gate.py'
+  push:
+    branches:
+      - main
+    paths:
+      - 'instructions/**'
+      - 'plugins/**'
+      - 'src/rosettify-plugins/**'
+      - 'src/hooks/**'
+      - 'src/*/package.json'
+      - 'src/*/package-lock.json'
+      - 'requirements*.txt'
+      - 'src/*/pyproject.toml'
+      - '.github/workflows/ci-release-guard.yml'
+      - '.github/scripts/npm_audit_gate.py'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plugin-drift:
+    name: Plugin sync check
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5 (SHA already pinned in publish-mcp-helm-chart.yml)
+
+      # TODO(follow-up): SHA-pin actions/setup-node once a verified SHA is
+      # adopted elsewhere in the repo (see F3-1 in docs/ARCHITECTURE.md#ci-release-guard).
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: |
+            src/hooks/package-lock.json
+            src/rosettify-plugins/package-lock.json
+
+      - name: Install hooks dependencies
+        working-directory: src/hooks
+        run: npm ci
+
+      - name: Build hooks bundles
+        working-directory: src/hooks
+        run: npm run build:quiet --silent
+
+      - name: Install rosettify-plugins dependencies
+        working-directory: src/rosettify-plugins
+        run: npm ci
+
+      - name: Build rosettify-plugins (local build, not npx)
+        working-directory: src/rosettify-plugins
+        run: npm run build
+
+      - name: Regenerate plugins/ - r3 standard
+        run: node src/rosettify-plugins/dist/cli.js --release r3 --deterministic-hooks false
+
+      - name: Regenerate plugins/ - r3 lightweight
+        run: node src/rosettify-plugins/dist/cli.js --release r3 --deterministic-hooks false --profile lightweight
+
+      - name: Check plugins/ matches the regenerated output
+        run: |
+          if ! git diff --exit-code -- plugins/; then
+            echo "::error::plugins/ is out of sync with instructions/ (or src/rosettify-plugins). Regenerate locally and commit the result:"
+            echo "  npm --prefix src/hooks run build:quiet"
+            echo "  npm --prefix src/rosettify-plugins run build"
+            echo "  node src/rosettify-plugins/dist/cli.js --release r3 --deterministic-hooks false"
+            echo "  node src/rosettify-plugins/dist/cli.js --release r3 --deterministic-hooks false --profile lightweight"
+            echo "  git add plugins/ && git commit"
+            exit 1
+          fi
+          echo "plugins/ is in sync."
+
+  npm-audit:
+    name: npm audit (${{ matrix.package }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - src/hooks
+          - src/curiocity
+          - src/rosettify
+          - src/rosettify-plugins
+          - src/rosettify-prompts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5 (SHA already pinned in publish-mcp-helm-chart.yml)
+
+      # TODO(follow-up): SHA-pin actions/setup-node (see plugin-drift job above).
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm ci
+
+      - name: Job summary header
+        run: |
+          echo "### npm audit: ${{ matrix.package }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| package | severities | gate |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+      # Gate: fails only on `critical`. `high`/`moderate` are reported as a
+      # warning annotation and a job-summary row, never blocking -- today's
+      # baseline already carries unfixed `high` findings (extract-zip,
+      # fast-uri/hono/qs, js-yaml). See docs/ARCHITECTURE.md#ci-release-guard.
+      - name: npm audit gate
+        run: python3 .github/scripts/npm_audit_gate.py --dir "${{ matrix.package }}" --fail-at critical
+
+  pip-audit:
+    name: pip-audit (root requirements)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5 (SHA already pinned in publish-mcp-helm-chart.yml)
+
+      # rosetta-cli and rosetta-mcp-server require Python >=3.12; requirements.txt
+      # covers both editable installs plus ims-mcp-server's only dependency
+      # (rosetta-mcp), so one pip-audit run over the root file audits every
+      # first-party Python package.
+      # TODO(follow-up): SHA-pin actions/setup-python (see plugin-drift job above).
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      # Gate: fails on any known vulnerability (pip-audit's default). Measured
+      # locally against today's requirements.txt with zero findings, so this
+      # is not a hidden-problem risk -- unlike npm's baseline, there is no
+      # existing finding to carve out.
+      - name: pip-audit gate
+        run: pip-audit -r requirements.txt
