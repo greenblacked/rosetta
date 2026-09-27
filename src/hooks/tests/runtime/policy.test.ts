@@ -4,12 +4,23 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
-  getEffectivePatternSets,
+  getEffectivePatternSets as getEffectivePatternSetsWithDeps,
   resolveManagedPolicyPath,
   resolveProjectPolicyPath,
   evaluateManagedTrust,
+  type ManagedTrustDeps,
 } from '../../src/runtime/policy';
 import { DANGEROUS_BASH } from '../../src/hooks/dangerous-actions/patterns';
+
+// Managed-layer trust depends on file ownership (root-owned, not group/world-writable). Test files
+// are owned by whoever runs the suite, so simulate a trusted root-owned managed file by default;
+// the P2-6 trust tests below pass their own deps explicitly.
+const TRUSTED_MANAGED: ManagedTrustDeps = { platform: 'linux', statSync: () => ({ uid: 0, mode: 0o100644 }) };
+const getEffectivePatternSets = (
+  cwd: string,
+  env?: Record<string, string | undefined>,
+  deps: ManagedTrustDeps = TRUSTED_MANAGED,
+) => getEffectivePatternSetsWithDeps(cwd, env, deps);
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'policy-test-'));
 
