@@ -475,7 +475,7 @@ Reviews a teammate's PR, branch, or diff against project context, architecture, 
 
 Batches dependency version bumps and CVE patches, ordered by dependency graph, with per-batch build/test validation and a rollback path.
 
-**Use when:** bumping library/framework versions or patching a CVE. Not for language/framework rewrites or re-architecture — use `modernization-flow` for those.
+**Use when:** bumping library/framework versions within a compatible major line (including a framework minor/patch bump, e.g. Spring Boot 3.2 to 3.5) or patching a CVE. Not for a major-version, language/framework rewrite, or re-architecture change — use `modernization-flow` for those.
 
 **Phases:**
 1. Inventory — read `docs/DEPENDENCIES.md`, manifests, lockfiles, and any advisory/CVE input
