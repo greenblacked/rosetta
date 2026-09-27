@@ -46,8 +46,42 @@ on:
         default: codex
 
 jobs:
+  # Preflight: this pipeline needs the Bifrost gateway secrets (agent job) and the
+  # project-board token (board load + claims). Forks and repositories without them
+  # used to fail every scheduled/issue run; instead, skip the whole pipeline (skipped
+  # jobs count as passing) and say which secrets are missing — names only, never
+  # values. Secrets are only tested for presence via env.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check required secrets
+        id: check
+        env:
+          BIFROST_HOST_NAME: ${{ secrets.BIFROST_HOST_NAME }}
+          BIFROST_API_KEY: ${{ secrets.BIFROST_API_KEY }}
+          SELF_AUTOMATION_PROJECTS_TOKEN: ${{ secrets.SELF_AUTOMATION_PROJECTS_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$BIFROST_HOST_NAME" ] || missing="$missing BIFROST_HOST_NAME"
+          [ -n "$BIFROST_API_KEY" ] || missing="$missing BIFROST_API_KEY"
+          [ -n "$SELF_AUTOMATION_PROJECTS_TOKEN" ] || missing="$missing SELF_AUTOMATION_PROJECTS_TOKEN"
+          if [ -z "$missing" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Implementer skipped::Missing repository secret(s):$missing. The pipeline is skipped; configure them to enable it."
+            echo "### Implementer skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "Missing repository secret(s):$missing" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   # ── Orchestrator ─────────────────────────────────────────────────────────────
   load-stories:
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.load.outputs.impl_matrix }}
