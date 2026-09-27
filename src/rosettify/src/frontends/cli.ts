@@ -8,9 +8,11 @@ import { dispatch } from "../shared/dispatch.js";
 import { extractOutput, logFailure } from "../shared/envelope.js";
 import { planToolDef } from "../commands/plan/index.js";
 import { specsToolDef } from "../commands/specs/index.js";
+import { doctorToolDef } from "../commands/doctor/index.js";
 import { helpToolDef } from "../commands/help/index.js";
 import type { PlanInput } from "../commands/plan/core.js";
 import type { SpecInput } from "../commands/specs/core.js";
+import type { DoctorInput } from "../commands/doctor/index.js";
 import type { EnrichedEnvelope } from "../registry/types.js";
 import { enableVerboseLogging, logger } from "../shared/logger.js";
 import { VERSION } from "../shared/version.js";
@@ -449,6 +451,52 @@ export async function runCli(args: string[]): Promise<void> {
   for (const row of SPECS_SUB_ROWS) {
     registerSpecsSub(specsCmd, row);
   }
+
+  // FR-SPECS-0027 — specs trace: registered by hand (not via SPECS_SUB_ROWS) because it takes a
+  // repeatable --source flag rather than the table's single positional slot.
+  specsCmd
+    .command("trace")
+    .description("specs trace")
+    .argument("<specs_file>", "Path to the specs document JSON file")
+    .option(
+      "--source <dir>",
+      "Source directory to scan (repeatable; default: src/tests under cwd, or cwd itself)",
+      (val: string, prev: string[]) => [...prev, val],
+      [] as string[],
+    )
+    .option("--id-regex <regex>", "Override the default id-matching regular expression")
+    .option("--id-prefixes <list>", "Comma-separated list of allowed id prefixes (default: FR,NFR,INT,DATA)")
+    .option("--tests <glob>", "Glob/substring pattern classifying a scanned file as a test file")
+    .option("--extensions <list>", "Comma-separated file extensions to scan")
+    .option("--strict", "Exit non-zero when any uncited/orphan finding exists")
+    .action(
+      async (
+        specsFile: string,
+        opts: {
+          source: string[];
+          idRegex?: string;
+          idPrefixes?: string;
+          tests?: string;
+          extensions?: string;
+          strict?: boolean;
+        },
+      ) => {
+        const input: SpecInput = {
+          subcommand: "trace",
+          specs_file: specsFile,
+          source_paths: opts.source && opts.source.length > 0 ? opts.source : undefined,
+          id_regex: opts.idRegex,
+          id_prefixes: opts.idPrefixes ? opts.idPrefixes.split(",") : undefined,
+          tests_glob: opts.tests,
+          extensions: opts.extensions ? opts.extensions.split(",") : undefined,
+          strict: !!opts.strict,
+        };
+        const envelope = await dispatch(specsToolDef, input);
+        writeResult(specsToolDef.name, envelope);
+        const violated = envelope.ok && !!(envelope.result as { violated?: boolean } | null)?.violated;
+        process.exit(envelope.ok && !violated ? 0 : 1);
+      },
+    );
 
   // Handle specs with no subcommand, --help, or unknown subcommand (mirrors plan's fallthrough)
   specsCmd.action(async (opts: { help?: boolean }, cmd: { args: string[] }) => {
