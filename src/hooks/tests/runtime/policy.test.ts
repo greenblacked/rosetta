@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'vitest';
+import { performance } from 'node:perf_hooks';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -6,6 +7,7 @@ import {
   getEffectivePatternSets,
   resolveManagedPolicyPath,
   resolveProjectPolicyPath,
+  evaluateManagedTrust,
 } from '../../src/runtime/policy';
 import { DANGEROUS_BASH } from '../../src/hooks/dangerous-actions/patterns';
 
@@ -263,6 +265,263 @@ describe('invalid / unsafe regex rejection', () => {
     });
     const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath });
     expect(sets.bash.some((p) => p.id === 'bad-tier-rule')).toBe(false);
+  });
+});
+
+// P1-2: the old nested-quantifier heuristic regex only caught a narrow shape and MISSED
+// `(a|a)*$`, `((a+))+$`, `(a+){2,}`, and (despite a comment that claimed otherwise) `(a|aa)+`
+// too — each one could hang the hook (`(a|a)*$` alone took ~39s on a 29-char adversarial
+// string). The tokenizer-based allowlist must reject all of these, fast, while still accepting
+// ordinary org patterns.
+describe('P1-2: regex-shape safety net (conservative tokenizer, not a shape-matching heuristic)', () => {
+  const addRule = (cwd: string, regex: string): ReturnType<typeof getEffectivePatternSets> => {
+    const managedPath = writeManaged(cwd, {
+      patterns: { add: [{ id: 'shape-rule', regex, tier: 'advise', reason: 'shape safety test' }] },
+    });
+    return getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath });
+  };
+
+  const EVIL_SHAPES = [
+    '(a+)+$',
+    '(a|a)*$',
+    '((a+))+$',
+    '(a+){2,}',
+    '(a|aa)+', // the OLD comment claimed this was already caught by the old heuristic — it wasn't.
+  ];
+
+  for (const regex of EVIL_SHAPES) {
+    test(`rejects catastrophic-backtracking shape: ${regex}`, () => {
+      const cwd = freshDir('shape-evil');
+      const sets = addRule(cwd, regex);
+      expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+    });
+  }
+
+  test('rejecting `(a|a)*$` is fast (does not fall through to actually running it)', () => {
+    const cwd = freshDir('shape-evil-perf');
+    const start = performance.now();
+    const sets = addRule(cwd, '(a|a)*$');
+    expect(performance.now() - start).toBeLessThan(50);
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  test('rejects a backreference', () => {
+    const cwd = freshDir('shape-backref');
+    const sets = addRule(cwd, '(foo)\\1');
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  test('rejects a named backreference', () => {
+    const cwd = freshDir('shape-named-backref');
+    const sets = addRule(cwd, '(?<x>foo)\\k<x>');
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  test('rejects lookahead', () => {
+    const cwd = freshDir('shape-lookahead');
+    const sets = addRule(cwd, 'foo(?=bar)');
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  test('rejects negative lookahead', () => {
+    const cwd = freshDir('shape-neg-lookahead');
+    const sets = addRule(cwd, 'foo(?!bar)');
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  test('rejects lookbehind', () => {
+    const cwd = freshDir('shape-lookbehind');
+    const sets = addRule(cwd, '(?<=foo)bar');
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  test('rejects a non-capturing group that is itself quantified (still a quantified group)', () => {
+    const cwd = freshDir('shape-noncap-quantified');
+    const sets = addRule(cwd, '(?:foo)+');
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  test('rejects groups nested more than 2 deep', () => {
+    const cwd = freshDir('shape-deep-nest');
+    const sets = addRule(cwd, '(a(b(c)))');
+    expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(false);
+  });
+
+  const LEGIT_SHAPES: readonly string[] = [
+    String.raw`terraform\s+destroy`,
+    String.raw`kubectl\s+delete\s+(ns|namespace)\b`,
+    String.raw`\bvault\s+delete\b`,
+    String.raw`[a-z]+\s+nuke`,
+    String.raw`foo-cli\s+--force`,
+  ];
+
+  for (const regex of LEGIT_SHAPES) {
+    test(`accepts legitimate org pattern: ${regex}`, () => {
+      const cwd = freshDir('shape-legit');
+      const sets = addRule(cwd, regex);
+      expect(sets.bash.some((p) => p.id === 'shape-rule')).toBe(true);
+    });
+  }
+});
+
+// P2-5: `overrides` used to be a plain `{}`, and `ID_RE` permits `constructor` as a pattern id.
+// A managed policy could ADD a pattern with `id: "constructor"`; when that pattern then went
+// through the project layer's `applyOverrides` (even with an EMPTY project override map), a
+// plain-object lookup `overrides['constructor']` returned the inherited `Object.prototype`
+// constructor function instead of `undefined` — silently corrupting that pattern's tier instead
+// of leaving it alone.
+describe('P2-5: no Object.prototype collision via a "constructor"-id pattern', () => {
+  test('a managed-added pattern with id "constructor" survives an EMPTY project policy unchanged', () => {
+    const repoRoot = freshDir('proto-collision');
+    fs.mkdirSync(path.join(repoRoot, '.git'));
+    const managedPath = writeManaged(repoRoot, {
+      patterns: {
+        add: [{ id: 'constructor', regex: '\\bdangerous-ctor-cmd\\b', tier: 'block', reason: 'constructor-id pattern' }],
+      },
+    });
+    // An empty (but present) project policy file is exactly what makes `Object.entries({})`
+    // produce a plain `{}` overrides object in the pre-fix code.
+    writeProject(repoRoot, { patterns: {} });
+    const sets = getEffectivePatternSets(repoRoot, { ROSETTA_POLICY_FILE: managedPath });
+    const p = sets.bash.find((x) => x.id === 'constructor');
+    expect(p).toBeDefined();
+    expect(p?.policy).toBe('block'); // unchanged — not corrupted into some non-tier value
+  });
+
+  test('a project policy explicitly overriding id "constructor" still works normally', () => {
+    const repoRoot = freshDir('proto-collision-explicit');
+    fs.mkdirSync(path.join(repoRoot, '.git'));
+    const managedPath = writeManaged(repoRoot, {
+      patterns: {
+        add: [{ id: 'constructor', regex: '\\bdangerous-ctor-cmd\\b', tier: 'advise', reason: 'constructor-id pattern' }],
+      },
+    });
+    writeProject(repoRoot, { patterns: { override: { constructor: 'reconsider' } } }); // a legitimate raise
+    const sets = getEffectivePatternSets(repoRoot, { ROSETTA_POLICY_FILE: managedPath });
+    const p = sets.bash.find((x) => x.id === 'constructor');
+    expect(p?.policy).toBe('reconsider');
+  });
+});
+
+// P2-6: the managed layer's full authority (can even disable a built-in guard via `"off"`) is
+// only meaningful if the file is actually admin-controlled. On POSIX that means root-owned and
+// not group/world-writable; a file that fails that check must be downgraded to project
+// (tighten-only) authority instead, with no exception for the default path vs. `ROSETTA_POLICY_FILE`.
+describe('P2-6: managed-layer trust — untrusted managed file is downgraded to tighten-only', () => {
+  const posixDeps = (uid: number, mode: number) => ({
+    platform: 'linux' as NodeJS.Platform,
+    statSync: () => ({ uid, mode }),
+  });
+
+  test('root-owned, not group/world-writable → full managed authority (can set "off")', () => {
+    const cwd = freshDir('trust-root-owned');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'rm-rf-home': 'off' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, posixDeps(0, 0o100644));
+    expect(sets.bash.some((p) => p.id === 'rm-rf-home')).toBe(false); // successfully disabled
+  });
+
+  test('NOT root-owned → downgraded to tighten-only: cannot disable a built-in', () => {
+    const cwd = freshDir('trust-not-root');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'rm-rf-home': 'off' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, posixDeps(1000, 0o100644));
+    expect(sets.bash.some((p) => p.id === 'rm-rf-home')).toBe(true); // "off" rejected, tier kept
+  });
+
+  test('root-owned but WORLD-writable → downgraded to tighten-only: cannot disable a built-in', () => {
+    const cwd = freshDir('trust-world-writable');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'rm-rf-home': 'off' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, posixDeps(0, 0o100646));
+    expect(sets.bash.some((p) => p.id === 'rm-rf-home')).toBe(true);
+  });
+
+  test('root-owned but GROUP-writable → downgraded to tighten-only: cannot disable a built-in', () => {
+    const cwd = freshDir('trust-group-writable');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'rm-rf-home': 'off' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, posixDeps(0, 0o100664));
+    expect(sets.bash.some((p) => p.id === 'rm-rf-home')).toBe(true);
+  });
+
+  test('untrusted managed file CAN still raise a tier (tighten-only is still allowed to tighten)', () => {
+    const cwd = freshDir('trust-untrusted-can-raise');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'git-reset-hard': 'block' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, posixDeps(1000, 0o100644));
+    const p = sets.bash.find((x) => x.id === 'git-reset-hard');
+    expect(p?.policy).toBe('block'); // raising is fine even without trust — only lowering/off needs it
+  });
+
+  test('untrusted managed file CANNOT lower a tier either (same tighten-only rule as project)', () => {
+    const cwd = freshDir('trust-untrusted-cannot-lower');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'rm-rf-root': 'advise' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, posixDeps(1000, 0o100644));
+    const p = sets.bash.find((x) => x.id === 'rm-rf-root');
+    expect(p?.policy).toBe('reconsider'); // unchanged — relaxation rejected
+  });
+
+  test('stat failure on the managed file → treated as untrusted (fail closed to tighten-only)', () => {
+    const cwd = freshDir('trust-stat-fails');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'rm-rf-home': 'off' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, {
+      platform: 'linux' as NodeJS.Platform,
+      statSync: () => { throw new Error('EACCES'); },
+    });
+    expect(sets.bash.some((p) => p.id === 'rm-rf-home')).toBe(true); // "off" rejected
+  });
+
+  test('Windows: a ROSETTA_POLICY_FILE override is always tighten-only, even though the default path is trusted', () => {
+    const cwd = freshDir('trust-windows-env-override');
+    const managedPath = writeManaged(cwd, { patterns: { override: { 'rm-rf-home': 'off' } } });
+    const sets = getEffectivePatternSets(cwd, { ROSETTA_POLICY_FILE: managedPath }, {
+      platform: 'win32' as NodeJS.Platform,
+      statSync: () => { throw new Error('no ACL API on this test double'); },
+    });
+    // ROSETTA_POLICY_FILE WAS set, so on Windows this is the tighten-only (env-override) branch,
+    // not the trusted-default-path branch — "off" must still be rejected.
+    expect(sets.bash.some((p) => p.id === 'rm-rf-home')).toBe(true);
+  });
+});
+
+describe('P2-6: evaluateManagedTrust (unit-level, both platform branches)', () => {
+  test('POSIX: root-owned, not group/world-writable → trusted', () => {
+    expect(evaluateManagedTrust('/etc/rosetta/policy.json', false, {
+      platform: 'linux', statSync: () => ({ uid: 0, mode: 0o100644 }),
+    }).trusted).toBe(true);
+  });
+
+  test('POSIX: not root-owned → untrusted', () => {
+    expect(evaluateManagedTrust('/etc/rosetta/policy.json', false, {
+      platform: 'darwin', statSync: () => ({ uid: 501, mode: 0o100600 }),
+    }).trusted).toBe(false);
+  });
+
+  test('POSIX: root-owned but world-writable → untrusted', () => {
+    expect(evaluateManagedTrust('/etc/rosetta/policy.json', false, {
+      platform: 'linux', statSync: () => ({ uid: 0, mode: 0o100666 }),
+    }).trusted).toBe(false);
+  });
+
+  test('POSIX: applies the SAME check to a ROSETTA_POLICY_FILE override as to the default path', () => {
+    const trustedDefault = evaluateManagedTrust('/etc/rosetta/policy.json', false, {
+      platform: 'linux', statSync: () => ({ uid: 0, mode: 0o100600 }),
+    });
+    const trustedOverride = evaluateManagedTrust('/repo/.rosetta-managed.json', true, {
+      platform: 'linux', statSync: () => ({ uid: 0, mode: 0o100600 }),
+    });
+    expect(trustedDefault.trusted).toBe(true);
+    expect(trustedOverride.trusted).toBe(true); // no special exemption for the env-var path
+  });
+
+  test('Windows: the default path is trusted by convention (no stat check performed)', () => {
+    const result = evaluateManagedTrust('C:\\ProgramData\\Rosetta\\policy.json', false, {
+      platform: 'win32', statSync: () => { throw new Error('must not be called'); },
+    });
+    expect(result.trusted).toBe(true);
+  });
+
+  test('Windows: a ROSETTA_POLICY_FILE override is always untrusted (tighten-only)', () => {
+    const result = evaluateManagedTrust('C:\\Users\\me\\policy.json', true, {
+      platform: 'win32', statSync: () => { throw new Error('must not be called'); },
+    });
+    expect(result.trusted).toBe(false);
   });
 });
 
