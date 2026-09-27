@@ -95,6 +95,12 @@ the platform team to publish per section 2. It does not publish anywhere itself 
 review the artifact, then push it to your mirror by hand or from a separate,
 higher-privilege workflow.
 
+With `deterministic_hooks: true`, the workflow builds `src/hooks` (`npm ci` + `npm run
+build:quiet`) before invoking the generator, so `.js` hook bundles exist to copy — then
+runs a verification step that fails the build if any generated `hooks.json` still
+references a bundle `.js` file that wasn't actually copied, instead of silently shipping
+a plugin whose hooks can't run.
+
 ---
 
 ## 2. Internal marketplace mirror / air-gapped install
