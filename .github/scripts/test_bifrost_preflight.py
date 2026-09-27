@@ -86,3 +86,53 @@ def test_preflight_script_output(name: str, host: str, key: str, expected: str) 
             assert "skipped" in summary.read_text()
         else:
             assert "::notice" not in result.stdout
+
+
+# --- Scheduled/issue-driven pipelines (repo-plan, repo-implement) ------------------
+# These run from the default branch on schedule/issue events. They need the Bifrost
+# secrets AND the project-board token, so the gate checks all three and skips the
+# whole pipeline (board load included) when any is missing.
+
+PIPELINES = {
+    "repo-plan.yml": "plan-story",
+    "repo-implement.yml": "implement-story",
+}
+PIPELINE_SECRETS = ("BIFROST_HOST_NAME", "BIFROST_API_KEY", "SELF_AUTOMATION_PROJECTS_TOKEN")
+
+
+@pytest.mark.parametrize("name,agent_job", PIPELINES.items())
+def test_pipeline_is_gated_before_board_load(name: str, agent_job: str) -> None:
+    jobs = _load(name)["jobs"]
+    assert jobs["load-stories"]["needs"] == "preflight"
+    assert jobs["load-stories"]["if"] == "needs.preflight.outputs.enabled == 'true'"
+    # The agent job still hangs off load-stories, so it is skipped transitively.
+    assert jobs[agent_job]["needs"] == "load-stories"
+
+
+@pytest.mark.parametrize("name", PIPELINES)
+def test_pipeline_preflight_is_permissionless_and_env_only(name: str) -> None:
+    workflow = _load(name)
+    assert workflow["jobs"]["preflight"]["permissions"] == {}
+    step = _check_step(workflow)
+    assert step["env"] == {s: "${{ secrets.%s }}" % s for s in PIPELINE_SECRETS}
+    assert "${{" not in step["run"]
+
+
+@pytest.mark.parametrize("name", PIPELINES)
+@pytest.mark.parametrize("present", [(1, 1, 1), (0, 1, 1), (1, 0, 1), (1, 1, 0), (0, 0, 0)])
+def test_pipeline_preflight_script_output(name: str, present: tuple) -> None:
+    script = _check_step(_load(name))["run"]
+    with tempfile.TemporaryDirectory() as tmp:
+        output, summary = Path(tmp, "out"), Path(tmp, "summary")
+        env = {"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}
+        for secret, on in zip(PIPELINE_SECRETS, present):
+            env[secret] = "value" if on else ""
+        result = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        expected = "true" if all(present) else "false"
+        assert output.read_text().strip() == f"enabled={expected}"
+        missing = [s for s, on in zip(PIPELINE_SECRETS, present) if not on]
+        for secret in PIPELINE_SECRETS:
+            assert (secret in result.stdout) == (secret in missing)
+        summary_text = summary.read_text() if summary.exists() else ""
+        assert "value" not in result.stdout + summary_text, "a secret value was echoed"
