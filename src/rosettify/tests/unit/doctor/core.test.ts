@@ -1,11 +1,21 @@
 /**
  * Unit tests for commands/doctor/core.ts (FR-DOC-0001, FR-DOC-0006).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { cmdDoctor } from "../../../src/commands/doctor/core.js";
+import * as compliance from "../../../src/commands/doctor/compliance.js";
+
+// Node's built-in "fs" and our own local ESM modules are frozen namespaces — vi.spyOn can't
+// redefine their properties directly. Re-exporting a plain (spy-able) object via vi.mock is the
+// standard workaround (see tests/unit/shared/doc-io.test.ts), used below to force an unexpected
+// failure deep in the scan so cmdDoctor's own internal_error catch path is exercised.
+vi.mock("../../../src/commands/doctor/compliance.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/commands/doctor/compliance.js")>();
+  return { ...actual };
+});
 
 let root: string;
 
@@ -14,6 +24,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -52,8 +63,8 @@ describe("cmdDoctor", () => {
   });
 
   it("adds a compliance report with one entry per detected install", async () => {
-    fs.mkdirSync(path.join(root, ".cursor"), { recursive: true });
-    fs.writeFileSync(path.join(root, ".cursor", "agents.md"), "x");
+    fs.mkdirSync(path.join(root, ".cursor", "skills"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".cursor", "skills", "agents.md"), "x");
     fs.writeFileSync(path.join(root, "plugin.json"), JSON.stringify({ name: "core-cursor-standalone", version: "1.0.0" }));
     const result = await cmdDoctor({ root, compliance: true, ide: ["cursor"] });
     expect(result.result!.compliance).toBeDefined();
@@ -64,5 +75,17 @@ describe("cmdDoctor", () => {
   it("restricts install detection to the supplied ide list", async () => {
     const result = await cmdDoctor({ root, ide: ["codex"] });
     expect(result.result!.checks.filter((c) => c.id.startsWith("install."))).toHaveLength(1);
+  });
+
+  it("returns internal_error (not a thrown exception) when a downstream step fails unexpectedly", async () => {
+    fs.mkdirSync(path.join(root, ".cursor"), { recursive: true });
+    fs.writeFileSync(path.join(root, "plugin.json"), JSON.stringify({ name: "core-cursor-standalone", version: "1.0.0" }));
+    vi.spyOn(compliance, "buildComplianceReport").mockImplementation(() => {
+      throw new Error("simulated downstream failure");
+    });
+    const result = await cmdDoctor({ root, compliance: true, ide: ["cursor"] });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("internal_error");
+    expect(result.error).toContain("simulated downstream failure");
   });
 });

@@ -91,14 +91,17 @@ describe("CLI — doctor", () => {
   });
 
   it("adds a compliance report with --compliance for a detected install", () => {
-    fs.mkdirSync(path.join(tmpDir, ".cursor"), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, ".cursor", "agents.md"), "x");
+    fs.mkdirSync(path.join(tmpDir, ".cursor", "skills"), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, ".cursor", "skills", "agents.md"), "x");
     fs.writeFileSync(path.join(tmpDir, "plugin.json"), JSON.stringify({ name: "core-cursor-standalone", version: "1.0.0" }));
     const result = run(["doctor", "--root", tmpDir, "--ide", "cursor", "--compliance"]);
-    const payload = result.json as { compliance?: { installs: { ide: string; combined_hash: string }[] } };
+    const payload = result.json as {
+      compliance?: { installs: { ide: string; combined_hash: string; file_count: number }[] };
+    };
     expect(payload.compliance).toBeDefined();
     expect(payload.compliance!.installs).toHaveLength(1);
     expect(payload.compliance!.installs[0]!.ide).toBe("cursor");
+    expect(payload.compliance!.installs[0]!.file_count).toBe(1);
   });
 
   it("--json is accepted and does not change the output shape", () => {

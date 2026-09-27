@@ -20,11 +20,24 @@ interface PluginMarker {
   manifestPath: string; // relative to root
   installDir: string; // relative to root — the directory the install lives under
   hooksPath: string; // relative to root
+  // FR-DOC-0002 — when set, `installDir` alone is not distinctive enough to claim a Rosetta
+  // install (e.g. `.github/` is common in any GitHub repo for unrelated reasons); at least one
+  // of these subdirectories, relative to `installDir`, must also be present.
+  discriminatorSubdirs?: string[];
 }
 
 const PLUGIN_MARKERS: PluginMarker[] = [
   { ide: "cursor", manifestPath: "plugin.json", installDir: ".cursor", hooksPath: path.join(".cursor", "hooks.json") },
-  { ide: "copilot", manifestPath: "plugin.json", installDir: ".github", hooksPath: path.join(".github", "hooks", "hooks.json") },
+  {
+    ide: "copilot",
+    manifestPath: "plugin.json",
+    installDir: ".github",
+    hooksPath: path.join(".github", "hooks", "hooks.json"),
+    // PLUGINS.md / FR-DOC-0002: a `.github/` directory alone is not Rosetta-specific (CI
+    // workflows, issue templates, etc.), so require the `skills` or `prompts` subdirectory the
+    // standalone Copilot layout actually ships (see plugins/core-copilot-standalone/.github/).
+    discriminatorSubdirs: ["skills", "prompts"],
+  },
   {
     ide: "antigravity",
     manifestPath: path.join(".agents", "plugins", "rosetta", "plugin.json"),
@@ -77,7 +90,9 @@ export function detectInstalls(root: string, ideFilter?: string[]): { checks: Do
     const installDirAbs = path.join(root, marker.installDir);
     const manifest = isDir(installDirAbs) ? readJsonSafe(manifestAbs) : null;
     const name = manifest && typeof manifest["name"] === "string" ? (manifest["name"] as string) : "";
-    const detected = !!manifest && (/rosetta/i.test(name) || /^core-/i.test(name));
+    const hasDiscriminator =
+      !marker.discriminatorSubdirs || marker.discriminatorSubdirs.some((sub) => isDir(path.join(installDirAbs, sub)));
+    const detected = !!manifest && hasDiscriminator && (/rosetta/i.test(name) || /^core-/i.test(name));
 
     if (detected) {
       const version = manifest && typeof manifest["version"] === "string" ? (manifest["version"] as string) : "";
@@ -177,7 +192,11 @@ export function checkPlanHealth(root: string): DoctorCheck[] {
 
   const checks: DoctorCheck[] = [];
   const planDirs = listPlanDirs(plansRoot);
-  let totalBackups = 0;
+  // FR-DOC-0004 — retention (PLAN_BACKUP_RETENTION) applies per plan directory (it caps how many
+  // backups the plan command's own write cycle leaves behind for ONE plan), so backup counts are
+  // compared per plan, never summed across plans/*/ — two plans each within retention must not
+  // warn just because their counts add up past the constant.
+  const perPlanBackupCounts = new Map<string, number>();
 
   for (const dirName of planDirs) {
     const dirAbs = path.join(plansRoot, dirName);
@@ -189,7 +208,7 @@ export function checkPlanHealth(root: string): DoctorCheck[] {
     } catch {
       entries = [];
     }
-    totalBackups += entries.filter((e) => /^plan\.json\.bak\d+$/.test(e)).length;
+    perPlanBackupCounts.set(dirName, entries.filter((e) => /^plan\.json\.bak\d+$/.test(e)).length);
 
     if (!fs.existsSync(planFileAbs)) continue; // a plan dir with no plan.json is not this check's concern
 
@@ -243,13 +262,20 @@ export function checkPlanHealth(root: string): DoctorCheck[] {
     }
   }
 
+  const overRetention = [...perPlanBackupCounts.entries()].filter(([, count]) => count > PLAN_BACKUP_RETENTION);
+  const totalBackups = [...perPlanBackupCounts.values()].reduce((sum, count) => sum + count, 0);
   checks.push({
     id: "plan.backups",
-    status: totalBackups > PLAN_BACKUP_RETENTION ? "warn" : "ok",
-    detail: `${totalBackups} plan backup file(s) found across plans/*/ (retention: ${PLAN_BACKUP_RETENTION})`,
+    status: overRetention.length > 0 ? "warn" : "ok",
+    detail:
+      overRetention.length > 0
+        ? `${overRetention.length} plan(s) exceed the backup retention (${PLAN_BACKUP_RETENTION}): ${overRetention
+            .map(([dirName, count]) => `${dirName} (${count})`)
+            .join(", ")}`
+        : `${totalBackups} plan backup file(s) found across plans/*/, none exceeding retention (${PLAN_BACKUP_RETENTION}) for its own plan`,
     fix:
-      totalBackups > PLAN_BACKUP_RETENTION
-        ? "More backups than the retention constant are present; this is expected only if backup pruning was interrupted — safe to remove the oldest plan.json.bakNNN files"
+      overRetention.length > 0
+        ? "More backups than the retention constant are present for at least one plan; this is expected only if backup pruning was interrupted — safe to remove its oldest plan.json.bakNNN files"
         : "",
   });
 
@@ -260,22 +286,30 @@ export function checkPlanHealth(root: string): DoctorCheck[] {
 // FR-DOC-0005 — hook registration presence
 // ---------------------------------------------------------------------------
 
-/** Best-effort extraction of `.js` bundle paths referenced from a hooks.json `command` string,
- * resolving the `${CLAUDE_PLUGIN_DIR}`-style macro to `installDirAbs`. Paths we cannot resolve
- * with confidence (no recognized macro, no relative form) are left out rather than guessed at. */
-function extractReferencedBundles(hooksDoc: Record<string, unknown>, installDirAbs: string): string[] {
+/** Best-effort extraction of `.js` bundle paths referenced from a hooks.json command string
+ * (real shapes: `node ${CLAUDE_PLUGIN_DIR}/skills/harness/scripts/tester.js --output '...'` —
+ * unquoted and macro-based for cursor/codex/antigravity — and a plain workspace-root-relative
+ * path such as `.github/hooks/x.js` for copilot, which has no plugin-dir macro of its own).
+ * Paths are matched whether or not they are quoted: `[^\s"']+\.js` finds the run of non-
+ * whitespace, non-quote characters ending in `.js`, which naturally excludes any surrounding
+ * quote characters and stops at the next whitespace for an unquoted command token. */
+function extractReferencedBundles(hooksDoc: Record<string, unknown>, root: string, installDirAbs: string): string[] {
   const found: string[] = [];
   const macroRe = /\$\{[A-Z_]+\}/g;
-  const jsPathRe = /(["'])((?:(?!\1).)*\.js)\1/g;
+  const jsPathRe = /[^\s"']+\.js\b/g;
 
   function walk(node: unknown): void {
     if (typeof node === "string") {
       let m: RegExpExecArray | null;
       jsPathRe.lastIndex = 0;
       while ((m = jsPathRe.exec(node)) !== null) {
-        const raw = m[2]!;
+        const raw = m[0];
+        // `${CLAUDE_PLUGIN_DIR}`-style macros resolve to the install directory itself; a path
+        // left over with no macro (copilot's own convention) is relative to the workspace root,
+        // NOT to installDirAbs — joining it against installDirAbs would double up a path that
+        // already starts with the install dir's own name (e.g. ".github/hooks/x.js").
         const resolved = raw.replace(macroRe, installDirAbs);
-        found.push(path.isAbsolute(resolved) ? resolved : path.join(installDirAbs, resolved));
+        found.push(path.isAbsolute(resolved) ? resolved : path.join(root, resolved));
       }
       return;
     }
@@ -293,7 +327,7 @@ function extractReferencedBundles(hooksDoc: Record<string, unknown>, installDirA
 }
 
 /** FR-DOC-0005 */
-export function checkHooks(installs: DetectedInstall[]): DoctorCheck[] {
+export function checkHooks(installs: DetectedInstall[], root: string): DoctorCheck[] {
   return installs.map((install) => {
     if (!fs.existsSync(install.hooksPathAbs)) {
       return {
@@ -312,7 +346,7 @@ export function checkHooks(installs: DetectedInstall[]): DoctorCheck[] {
         fix: "Regenerate the plugin, or repair hooks.json by hand",
       } as DoctorCheck;
     }
-    const referenced = extractReferencedBundles(doc, install.installDirAbs);
+    const referenced = extractReferencedBundles(doc, root, install.installDirAbs);
     const missing = referenced.filter((p) => !fs.existsSync(p));
     if (missing.length > 0) {
       return {

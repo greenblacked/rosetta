@@ -1,11 +1,20 @@
 /**
  * Unit tests for commands/doctor/detectors.ts (FR-DOC-0002..0005).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { detectInstalls, checkWorkspaceFiles, checkPlanHealth, checkHooks } from "../../../src/commands/doctor/detectors.js";
+
+// Node's built-in "fs" is a frozen ESM namespace — vi.spyOn can't redefine its properties
+// directly. Re-exporting a plain (spy-able) object via vi.mock is the standard workaround (see
+// tests/unit/shared/doc-io.test.ts), used below to simulate an unreadable plans/ directory
+// without relying on OS file permissions (the test runner may execute as root).
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  return { ...actual };
+});
 
 let root: string;
 
@@ -14,6 +23,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -81,6 +91,35 @@ describe("detectInstalls", () => {
     writeFile("plugin.json", "{{not json");
     const { installs } = detectInstalls(root, ["cursor"]);
     expect(installs).toEqual([]);
+  });
+
+  // FR-DOC-0002 review finding: a Cursor standalone install alongside an unrelated `.github/`
+  // directory (very common — CI workflows, issue templates) must not be reported as a Copilot
+  // install just because a root plugin.json happens to exist and `.github/` is a directory.
+  it("does not falsely detect copilot from an unrelated .github directory alongside a cursor install", () => {
+    fs.mkdirSync(path.join(root, ".cursor"), { recursive: true });
+    fs.mkdirSync(path.join(root, ".github", "workflows"), { recursive: true });
+    writeFile(path.join(".github", "workflows", "ci.yml"), "name: ci");
+    writeJson("plugin.json", { name: "core-cursor-standalone", version: "1.0.0" });
+    const { checks, installs } = detectInstalls(root, ["cursor", "copilot"]);
+    const copilot = checks.find((c) => c.id === "install.copilot")!;
+    expect(copilot.status).toBe("warn");
+    expect(installs.some((i) => i.ide === "copilot")).toBe(false);
+  });
+
+  it("detects a copilot standalone install when .github carries a skills subdirectory", () => {
+    fs.mkdirSync(path.join(root, ".github", "skills"), { recursive: true });
+    writeJson("plugin.json", { name: "core-copilot-standalone", version: "2.0.0" });
+    const { checks, installs } = detectInstalls(root, ["copilot"]);
+    expect(checks).toEqual([{ id: "install.copilot", status: "ok", detail: expect.stringContaining("2.0.0"), fix: "" }]);
+    expect(installs).toHaveLength(1);
+  });
+
+  it("detects a copilot standalone install when .github carries a prompts subdirectory", () => {
+    fs.mkdirSync(path.join(root, ".github", "prompts"), { recursive: true });
+    writeJson("plugin.json", { name: "core-copilot-standalone", version: "2.0.0" });
+    const { installs } = detectInstalls(root, ["copilot"]);
+    expect(installs).toHaveLength(1);
   });
 
   it("reports install.duplicate when a cursor standalone and a claude plugin manifest coexist", () => {
@@ -162,6 +201,13 @@ describe("checkPlanHealth", () => {
     expect(entry.detail).toContain("could not be read");
   });
 
+  it("counts backups for a plan directory that has no plan.json of its own (still not a plan.<name> check)", () => {
+    writeFile("plans/orphan-backups/plan.json.bak000", "{}");
+    const checks = checkPlanHealth(root);
+    expect(checks.find((c) => c.id === "plan.orphan-backups")).toBeUndefined();
+    expect(checks.find((c) => c.id === "plan.backups")!.status).toBe("ok");
+  });
+
   it("reports plan.backups as warn when backup count exceeds retention", () => {
     for (let i = 0; i < 7; i++) {
       writeFile(`plans/checkout/plan.json.bak${String(i).padStart(3, "0")}`, "{}");
@@ -178,11 +224,67 @@ describe("checkPlanHealth", () => {
     const backups = checks.find((c) => c.id === "plan.backups")!;
     expect(backups.status).toBe("ok");
   });
+
+  // FR-DOC-0004 review finding: retention is per plan; two plans each within retention must not
+  // warn just because their counts sum past the constant across plans/*/.
+  it("reports plan.backups as ok when each plan is within retention even though the total across plans exceeds it", () => {
+    for (let i = 0; i < 4; i++) writeFile(`plans/checkout/plan.json.bak${String(i).padStart(3, "0")}`, "{}");
+    for (let i = 0; i < 4; i++) writeFile(`plans/billing/plan.json.bak${String(i).padStart(3, "0")}`, "{}");
+    writeJson("plans/checkout/plan.json", { name: "checkout", phases: [] });
+    writeJson("plans/billing/plan.json", { name: "billing", phases: [] });
+    const checks = checkPlanHealth(root);
+    const backups = checks.find((c) => c.id === "plan.backups")!;
+    expect(backups.status).toBe("ok"); // 4 + 4 = 8 > retention(5), but no single plan exceeds it
+  });
+
+  it("does not crash when plans/ itself cannot be enumerated (readdirSync failure)", () => {
+    fs.mkdirSync(path.join(root, "plans"), { recursive: true });
+    const plansAbs = path.join(root, "plans");
+    const originalReaddirSync = fs.readdirSync;
+    vi.spyOn(fs, "readdirSync").mockImplementation((p: fs.PathLike, ...rest: unknown[]) => {
+      if (p === plansAbs) throw new Error("EACCES: simulated");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (originalReaddirSync as any)(p, ...rest);
+    });
+    const checks = checkPlanHealth(root);
+    expect(checks.find((c) => c.id === "plan.backups")!.status).toBe("ok");
+  });
+
+  it("does not crash when one plan directory's own entries cannot be listed (still checks the rest)", () => {
+    writeJson("plans/checkout/plan.json", { name: "checkout", phases: [] });
+    writeJson("plans/billing/plan.json", { name: "billing", phases: [] });
+    const checkoutDirAbs = path.join(root, "plans", "checkout");
+    const originalReaddirSync = fs.readdirSync;
+    vi.spyOn(fs, "readdirSync").mockImplementation((p: fs.PathLike, ...rest: unknown[]) => {
+      if (p === checkoutDirAbs) throw new Error("EACCES: simulated");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (originalReaddirSync as any)(p, ...rest);
+    });
+    const checks = checkPlanHealth(root);
+    expect(checks.find((c) => c.id === "plan.checkout")!.status).toBe("ok");
+    expect(checks.find((c) => c.id === "plan.billing")!.status).toBe("ok");
+    expect(checks.find((c) => c.id === "plan.backups")!.status).toBe("ok");
+  });
+
+  it("reports plan.backups as warn naming only the plan that exceeds retention", () => {
+    for (let i = 0; i < 7; i++) writeFile(`plans/checkout/plan.json.bak${String(i).padStart(3, "0")}`, "{}");
+    writeFile("plans/billing/plan.json.bak000", "{}");
+    writeJson("plans/checkout/plan.json", { name: "checkout", phases: [] });
+    writeJson("plans/billing/plan.json", { name: "billing", phases: [] });
+    const checks = checkPlanHealth(root);
+    const backups = checks.find((c) => c.id === "plan.backups")!;
+    expect(backups.status).toBe("warn");
+    expect(backups.detail).toContain("checkout");
+    expect(backups.detail).not.toContain("billing (");
+  });
 });
 
 describe("checkHooks", () => {
   it("reports warn when the install has no hooks.json", () => {
-    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs: path.join(root, ".cursor"), hooksPathAbs: path.join(root, ".cursor", "hooks.json") }]);
+    const checks = checkHooks(
+      [{ ide: "cursor", version: "1.0.0", installDirAbs: path.join(root, ".cursor"), hooksPathAbs: path.join(root, ".cursor", "hooks.json") }],
+      root,
+    );
     expect(checks).toEqual([{ id: "hooks.cursor", status: "warn", detail: expect.any(String), fix: "" }]);
   });
 
@@ -190,7 +292,7 @@ describe("checkHooks", () => {
     const installDirAbs = path.join(root, ".cursor");
     fs.mkdirSync(installDirAbs, { recursive: true });
     fs.writeFileSync(path.join(installDirAbs, "hooks.json"), "{{not json");
-    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }]);
+    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
     expect(checks[0]!.status).toBe("fail");
   });
 
@@ -198,30 +300,98 @@ describe("checkHooks", () => {
     const installDirAbs = path.join(root, ".cursor");
     fs.mkdirSync(installDirAbs, { recursive: true });
     fs.writeFileSync(path.join(installDirAbs, "hooks.json"), JSON.stringify({ version: 1, hooks: {} }));
-    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }]);
+    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
     expect(checks[0]!.status).toBe("ok");
   });
 
-  it("reports ok when every referenced bundle resolves under the install dir", () => {
+  it("reports ok when every referenced bundle resolves under the install dir (macro-based, quoted)", () => {
     const installDirAbs = path.join(root, ".cursor");
     fs.mkdirSync(path.join(installDirAbs, "hooks"), { recursive: true });
     fs.writeFileSync(path.join(installDirAbs, "hooks", "guard.js"), "// noop");
     fs.writeFileSync(
       path.join(installDirAbs, "hooks.json"),
-      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'node "hooks/guard.js"' }] }] } }),
+      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'node "${CLAUDE_PLUGIN_DIR}/hooks/guard.js"' }] }] } }),
     );
-    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }]);
+    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
     expect(checks[0]!.status).toBe("ok");
   });
 
-  it("reports fail when a referenced bundle does not resolve", () => {
+  it("reports fail when a macro-resolved referenced bundle does not resolve", () => {
     const installDirAbs = path.join(root, ".cursor");
     fs.mkdirSync(installDirAbs, { recursive: true });
     fs.writeFileSync(
       path.join(installDirAbs, "hooks.json"),
       JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'node "${CLAUDE_PLUGIN_DIR}/hooks/missing.js"' }] }] } }),
     );
-    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }]);
+    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
+    expect(checks[0]!.status).toBe("fail");
+  });
+
+  // FR-DOC-0005 review finding: cursor/codex hooks.json commands are unquoted (real shape, e.g.
+  // plugins/core-cursor-standalone/.cursor/skills/harness/references/hooks/cursor/hooks.json):
+  // `node ${CLAUDE_PLUGIN_DIR}/skills/harness/scripts/tester.js --output '...'` — the bundle path
+  // itself carries no surrounding quotes. Previously this was never matched, so a missing bundle
+  // referenced this way was silently never reported.
+  it("reports ok for an unquoted macro-based command whose bundle exists", () => {
+    const installDirAbs = path.join(root, ".cursor");
+    fs.mkdirSync(path.join(installDirAbs, "skills", "harness", "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(installDirAbs, "skills", "harness", "scripts", "tester.js"), "// noop");
+    fs.writeFileSync(
+      path.join(installDirAbs, "hooks.json"),
+      JSON.stringify({
+        hooks: {
+          sessionStart: [
+            {
+              type: "command",
+              command:
+                "node ${CLAUDE_PLUGIN_DIR}/skills/harness/scripts/tester.js --output '{\"additional_context\":\"x\"}' --tag sessionStart",
+            },
+          ],
+        },
+      }),
+    );
+    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
+    expect(checks[0]!.status).toBe("ok");
+  });
+
+  it("reports fail for an unquoted macro-based command whose bundle is missing", () => {
+    const installDirAbs = path.join(root, ".cursor");
+    fs.mkdirSync(installDirAbs, { recursive: true });
+    fs.writeFileSync(
+      path.join(installDirAbs, "hooks.json"),
+      JSON.stringify({
+        hooks: {
+          sessionStart: [{ type: "command", command: "node ${CLAUDE_PLUGIN_DIR}/skills/harness/scripts/tester.js --tag sessionStart" }],
+        },
+      }),
+    );
+    const checks = checkHooks([{ ide: "cursor", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
+    expect(checks[0]!.status).toBe("fail");
+  });
+
+  // FR-DOC-0005 review finding: a copilot command with no `${CLAUDE_PLUGIN_DIR}` macro is
+  // relative to the workspace root, not to installDirAbs — joining it against installDirAbs
+  // doubled the install dir's own name (`.github/.github/hooks/x.js`), a false "fail".
+  it("resolves a macro-free relative bundle path against the workspace root, not the install dir", () => {
+    const installDirAbs = path.join(root, ".github");
+    fs.mkdirSync(path.join(installDirAbs, "hooks"), { recursive: true });
+    fs.writeFileSync(path.join(installDirAbs, "hooks", "x.js"), "// noop");
+    fs.writeFileSync(
+      path.join(installDirAbs, "hooks.json"),
+      JSON.stringify({ hooks: { sessionStart: [{ bash: 'node ".github/hooks/x.js" --tag sessionStart' }] } }),
+    );
+    const checks = checkHooks([{ ide: "copilot", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
+    expect(checks[0]!.status).toBe("ok");
+  });
+
+  it("reports fail (not a false ok) for a macro-free relative bundle path that truly does not exist", () => {
+    const installDirAbs = path.join(root, ".github");
+    fs.mkdirSync(installDirAbs, { recursive: true });
+    fs.writeFileSync(
+      path.join(installDirAbs, "hooks.json"),
+      JSON.stringify({ hooks: { sessionStart: [{ bash: 'node ".github/hooks/missing.js" --tag sessionStart' }] } }),
+    );
+    const checks = checkHooks([{ ide: "copilot", version: "1.0.0", installDirAbs, hooksPathAbs: path.join(installDirAbs, "hooks.json") }], root);
     expect(checks[0]!.status).toBe("fail");
   });
 });
