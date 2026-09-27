@@ -1,13 +1,14 @@
 // Rosetta-AI-reviewed: pattern definitions only — not executable SQL/shell
 import { advise, deny } from '../../runtime/result-helpers';
 import { debugLogHookBranch } from '../../runtime/debug-log';
-import type { HookContext, HookResult } from '../../runtime/types';
+import { appendAuditRecord, type AuditDecision } from '../../runtime/audit';
 import {
-  DANGEROUS_BASH,
-  DANGEROUS_CONTENT,
-  DANGEROUS_PATHS,
-  type DangerPattern,
-} from './patterns';
+  getEffectivePatternSets,
+  MAX_ORG_MATCH_INPUT_LENGTH,
+  type EffectivePattern,
+  type EffectivePatternSets,
+} from '../../runtime/policy';
+import type { HookContext, HookResult } from '../../runtime/types';
 
 /**
  * Matches the `Rosetta-AI-reviewed` brand token with word boundaries on both sides.
@@ -41,7 +42,7 @@ const MCP_SHELL_FIELDS   = ['command', 'cmd', 'shell_command'] as const;
 const MCP_PATH_FIELDS    = ['path', 'file_path', 'filePath', 'target', 'target_path'] as const;
 const MCP_CONTENT_FIELDS = ['content', 'new_string', 'query', 'sql'] as const;
 
-type PatternHit = { result: HookResult; pattern: DangerPattern | null };
+type PatternHit = { result: HookResult; pattern: EffectivePattern | null };
 
 /** The write-time field an override marker should be appended to, by tool kind.
  *  MCP tools (toolKind is the mcp__… name) fall through to the generic wording. */
@@ -58,7 +59,7 @@ function overrideField(toolKind: string): string {
 /** Soft-deny message (policy 'reconsider'). Per the review directive the message is
  *  intentionally minimal: a static generic reason, one coaching line, and how to
  *  override. It NEVER echoes the command/payload — the AI already knows what it ran. */
-function buildReconsiderDenyMessage(pattern: DangerPattern, toolKind: string): string {
+function buildReconsiderDenyMessage(pattern: EffectivePattern, toolKind: string): string {
   return [
     `Dangerous action [${pattern.id}]: ${pattern.reason}`,
     'Check blast radius / recoverability first.',
@@ -68,40 +69,69 @@ function buildReconsiderDenyMessage(pattern: DangerPattern, toolKind: string): s
 
 /** Non-blocking safety nudge (policy 'advise'). Warns without denying — the action
  *  still proceeds. Same minimal shape: static reason, no evidence echo. */
-function buildAdviseMessage(pattern: DangerPattern): string {
+function buildAdviseMessage(pattern: EffectivePattern): string {
   return [
     `Heads-up [${pattern.id}]: ${pattern.reason}`,
     'Non-blocking notice — confirm this is intended before proceeding.',
   ].join('\n');
 }
 
+/** Hard-deny message (F3-3 policy 'block'). Unlike 'reconsider', there is deliberately NO
+ *  override instruction here — the `Rosetta-AI-reviewed` marker is never consulted for a
+ *  'block'-tier pattern (see evaluateDangerous). Only an org's managed policy can set this
+ *  tier; it is never a built-in. */
+function buildBlockDenyMessage(pattern: EffectivePattern): string {
+  return [
+    `Blocked by organization policy [${pattern.id}]: ${pattern.reason}`,
+    'This action cannot be overridden by the agent.',
+    'Ask a human to run it outside the agent if it is genuinely required.',
+  ].join('\n');
+}
+
 /** Build the hook result for a matched pattern, dispatching on its policy tier.
- *  'advise' → non-blocking notice; 'reconsider' → soft-deny (overridable). */
-function buildResultForPattern(pattern: DangerPattern, toolKind: string): HookResult {
+ *  'advise' → non-blocking notice; 'reconsider' → soft-deny (overridable);
+ *  'block' → hard-deny (never overridable, org-policy only). */
+function buildResultForPattern(pattern: EffectivePattern, toolKind: string): HookResult {
   if (pattern.policy === 'advise') {
     return advise(buildAdviseMessage(pattern));
+  }
+  if (pattern.policy === 'block') {
+    return deny(buildBlockDenyMessage(pattern));
   }
   return deny(buildReconsiderDenyMessage(pattern, toolKind));
 }
 
+/** ORG-supplied patterns (added, or overriding a built-in id) are only tested against a
+ *  bounded prefix of the candidate string — part of F3-3's regex-safety story: a pattern
+ *  that was validated at load time (compiled, length-capped, nested-quantifier heuristic)
+ *  still gets a bounded worst case at match time. Built-in patterns are untouched — they
+ *  already carry their own anti-quadratic invariants and scaling tests (see patterns.ts). */
+function testEffective(pattern: EffectivePattern, value: string): boolean {
+  const candidate = pattern.source === 'builtin' ? value : value.slice(0, MAX_ORG_MATCH_INPUT_LENGTH);
+  return pattern.re.test(candidate);
+}
+
 function matchPatterns(
-  patterns: readonly DangerPattern[],
+  patterns: readonly EffectivePattern[],
   value: string,
-): DangerPattern | null {
+): EffectivePattern | null {
   for (const p of patterns) {
-    if (p.re.test(value)) return p;
+    if (testEffective(p, value)) return p;
   }
   return null;
 }
 
-function matchDangerousPath(filePath: string): DangerPattern | null {
+function matchDangerousPath(
+  patterns: readonly EffectivePattern[],
+  filePath: string,
+): EffectivePattern | null {
   // A8: normalize Windows backslashes before the `/`-only trailing-slash strip and split, so
   // `C:\Users\me\.aws\credentials` matches the same as its POSIX form.
   const normalizedPath = filePath.replace(/\\/g, '/').replace(/\/+$/, '');
   const basename = normalizedPath.split('/').pop() ?? normalizedPath;
-  for (const p of DANGEROUS_PATHS) {
-    if (p.re.test(normalizedPath)) return p;
-    if (p.re.test(basename)) return p;
+  for (const p of patterns) {
+    if (testEffective(p, normalizedPath)) return p;
+    if (testEffective(p, basename)) return p;
   }
   return null;
 }
@@ -159,54 +189,54 @@ export function hasAIReviewedMarker(
  * shell string (redirects, quoting) added real complexity for only that narrow,
  * non-blocking case, so it was dropped.
  */
-function evalShellString(command: string, toolKind: string): PatternHit {
-  const bashPattern = matchPatterns(DANGEROUS_BASH, command);
+function evalShellString(command: string, toolKind: string, sets: EffectivePatternSets): PatternHit {
+  const bashPattern = matchPatterns(sets.bash, command);
   if (bashPattern) return { result: buildResultForPattern(bashPattern, toolKind), pattern: bashPattern };
 
-  const contentPattern = matchPatterns(DANGEROUS_CONTENT, command);
+  const contentPattern = matchPatterns(sets.content, command);
   if (contentPattern) return { result: buildResultForPattern(contentPattern, toolKind), pattern: contentPattern };
 
   return { result: null, pattern: null };
 }
 
-function evalBash(ctx: HookContext): PatternHit {
+function evalBash(ctx: HookContext, sets: EffectivePatternSets): PatternHit {
   const command = ctx.toolInput.command;
   if (typeof command !== 'string') return { result: null, pattern: null };
-  return evalShellString(command, 'bash');
+  return evalShellString(command, 'bash', sets);
 }
 
-function evalWrite(ctx: HookContext): PatternHit {
+function evalWrite(ctx: HookContext, sets: EffectivePatternSets): PatternHit {
   const filePath = ctx.toolInput.file_path;
   if (typeof filePath === 'string') {
-    const pattern = matchDangerousPath(filePath);
+    const pattern = matchDangerousPath(sets.paths, filePath);
     if (pattern) return { result: buildResultForPattern(pattern, 'write'), pattern };
   }
   const content = ctx.toolInput.content;
   if (typeof content === 'string') {
-    const pattern = matchPatterns(DANGEROUS_CONTENT, content);
+    const pattern = matchPatterns(sets.content, content);
     if (pattern) return { result: buildResultForPattern(pattern, 'write'), pattern };
   }
   return { result: null, pattern: null };
 }
 
-function evalEdit(ctx: HookContext): PatternHit {
+function evalEdit(ctx: HookContext, sets: EffectivePatternSets): PatternHit {
   const filePath = ctx.toolInput.file_path;
   if (typeof filePath === 'string') {
-    const pattern = matchDangerousPath(filePath);
+    const pattern = matchDangerousPath(sets.paths, filePath);
     if (pattern) return { result: buildResultForPattern(pattern, 'edit'), pattern };
   }
   const newString = ctx.toolInput.new_string;
   if (typeof newString === 'string') {
-    const pattern = matchPatterns(DANGEROUS_CONTENT, newString);
+    const pattern = matchPatterns(sets.content, newString);
     if (pattern) return { result: buildResultForPattern(pattern, 'edit'), pattern };
   }
   return { result: null, pattern: null };
 }
 
-function evalMultiEdit(ctx: HookContext): PatternHit {
+function evalMultiEdit(ctx: HookContext, sets: EffectivePatternSets): PatternHit {
   const filePath = ctx.toolInput.file_path;
   if (typeof filePath === 'string') {
-    const pattern = matchDangerousPath(filePath);
+    const pattern = matchDangerousPath(sets.paths, filePath);
     if (pattern) return { result: buildResultForPattern(pattern, 'multi-edit'), pattern };
   }
   const edits = ctx.toolInput.edits;
@@ -215,7 +245,7 @@ function evalMultiEdit(ctx: HookContext): PatternHit {
       if (edit && typeof edit === 'object') {
         const ns = (edit as Record<string, unknown>).new_string;
         if (typeof ns === 'string') {
-          const pattern = matchPatterns(DANGEROUS_CONTENT, ns);
+          const pattern = matchPatterns(sets.content, ns);
           if (pattern) return { result: buildResultForPattern(pattern, 'multi-edit'), pattern };
         }
       }
@@ -224,58 +254,85 @@ function evalMultiEdit(ctx: HookContext): PatternHit {
   return { result: null, pattern: null };
 }
 
-function evalMcpCall(ctx: HookContext): PatternHit {
+function evalMcpCall(ctx: HookContext, sets: EffectivePatternSets): PatternHit {
   const input = ctx.toolInput;
 
   for (const f of MCP_SHELL_FIELDS) {
     const v = input[f];
     if (typeof v === 'string') {
-      const hit = evalShellString(v, ctx.toolName);
+      const hit = evalShellString(v, ctx.toolName, sets);
       if (hit.pattern) return hit;
     }
   }
   for (const f of MCP_PATH_FIELDS) {
     const v = input[f];
     if (typeof v === 'string') {
-      const pattern = matchDangerousPath(v);
+      const pattern = matchDangerousPath(sets.paths, v);
       if (pattern) return { result: buildResultForPattern(pattern, ctx.toolName), pattern };
     }
   }
   for (const f of MCP_CONTENT_FIELDS) {
     const v = input[f];
     if (typeof v === 'string') {
-      const pattern = matchPatterns(DANGEROUS_CONTENT, v);
+      const pattern = matchPatterns(sets.content, v);
       if (pattern) return { result: buildResultForPattern(pattern, ctx.toolName), pattern };
     }
   }
   return { result: null, pattern: null };
 }
 
-/** Single traversal: detects the first matching pattern and returns both deny result and pattern. */
-function detectDanger(ctx: HookContext): PatternHit {
+/** Single traversal: detects the first matching pattern and returns both deny result and pattern.
+ *  `sets` is the F3-3 policy-merged pattern set (built-ins + managed + project overlay), computed
+ *  once per evaluation from `ctx.cwd`. */
+function detectDanger(ctx: HookContext, sets: EffectivePatternSets): PatternHit {
   switch (ctx.toolKind) {
-    case 'bash':       return evalBash(ctx);
-    case 'write':      return evalWrite(ctx);
-    case 'edit':       return evalEdit(ctx);
-    case 'multi-edit': return evalMultiEdit(ctx);
-    case 'mcp-call':   return evalMcpCall(ctx);
+    case 'bash':       return evalBash(ctx, sets);
+    case 'write':      return evalWrite(ctx, sets);
+    case 'edit':       return evalEdit(ctx, sets);
+    case 'multi-edit': return evalMultiEdit(ctx, sets);
+    case 'mcp-call':   return evalMcpCall(ctx, sets);
     default:           return { result: null, pattern: null };
   }
 }
 
 /** Returns both the deny result and the matched pattern for policy-aware callers. */
-export function evalPatternAndPolicy(ctx: HookContext): { result: HookResult; pattern: DangerPattern | null } {
-  return detectDanger(ctx);
+export function evalPatternAndPolicy(ctx: HookContext): { result: HookResult; pattern: EffectivePattern | null } {
+  return detectDanger(ctx, getEffectivePatternSets(ctx.cwd));
+}
+
+const AUDIT_HOOK_NAME = 'dangerous-actions';
+
+/** F3-4: record one guardrail decision to the local audit trail. Always safe — disabled
+ *  (the default) and any failure are both no-ops inside appendAuditRecord itself. */
+function recordAudit(ctx: HookContext, decision: AuditDecision, pattern: EffectivePattern | null): void {
+  const isPathTarget = ctx.toolKind === 'write' || ctx.toolKind === 'edit' || ctx.toolKind === 'multi-edit';
+  appendAuditRecord({
+    hook: AUDIT_HOOK_NAME,
+    decision,
+    patternId: pattern?.id ?? null,
+    toolName: ctx.toolName,
+    toolKind: ctx.toolKind,
+    ide: ctx.ide,
+    sessionId: ctx.sessionId,
+    command: isPathTarget ? null : (typeof ctx.toolInput.command === 'string' ? ctx.toolInput.command : null),
+    filePath: isPathTarget ? ctx.filePath : null,
+    cwd: ctx.cwd,
+  });
 }
 
 /**
  * Pure evaluation for the dangerous-actions hook.
- * Applies policy tier:
+ * Applies policy tier (built-in, or as tightened/extended by an F3-3 org policy overlay):
  *   - 'advise'    → non-blocking notice, always surfaced (marker is irrelevant).
  *   - 'reconsider'→ soft-deny: block this attempt unless the AI-reviewed marker is
  *                   present (the AI can re-issue with it, or stop and ask the user).
- * The hook never hard-denies — a determined, user-sanctioned action is always
- * reachable via the marker. Returns null if safe (no match or marker honored).
+ *   - 'block'     → hard-deny: the marker is NEVER consulted. Only reachable through an
+ *                   org's managed policy (see runtime/policy.ts) — there is still no
+ *                   built-in hard-deny tier, preserving the existing "hook never
+ *                   hard-denies on its own" invariant.
+ * Returns null if safe (no match or marker honored).
+ *
+ * Every branch also appends one F3-4 audit record (content-free — see runtime/audit.ts).
  *
  * @internal Used by unit tests.
  */
@@ -290,7 +347,6 @@ export function evaluateDangerous(ctx: HookContext): HookResult {
   }
 
   // Non-blocking advise-tier notices are always surfaced (marker is irrelevant).
-  // There is no hard-deny tier — the hook only soft-denies (reconsider) or advises.
   if (pattern?.policy === 'advise') {
     debugLogHookBranch('dangerous-actions', 'advise', {
       toolKind: ctx.toolKind,
@@ -298,6 +354,20 @@ export function evaluateDangerous(ctx: HookContext): HookResult {
       patternId: pattern.id,
       patternLabel: pattern.label,
     });
+    recordAudit(ctx, 'advise', pattern);
+    return result;
+  }
+
+  // F3-3 'block' tier: org-managed only, never in the built-in pattern sets. Hard-deny —
+  // the marker is not even checked, unlike every other tier here.
+  if (pattern?.policy === 'block') {
+    debugLogHookBranch('dangerous-actions', 'block-deny', {
+      toolKind: ctx.toolKind,
+      toolName: ctx.toolName,
+      patternId: pattern.id,
+      patternLabel: pattern.label,
+    });
+    recordAudit(ctx, 'block', pattern);
     return result;
   }
 
@@ -309,6 +379,7 @@ export function evaluateDangerous(ctx: HookContext): HookResult {
       patternId: pattern?.id ?? null,
       patternLabel: pattern?.label ?? null,
     });
+    recordAudit(ctx, 'override', pattern);
     return null;
   }
   debugLogHookBranch('dangerous-actions', 'reconsider-deny', {
@@ -317,5 +388,6 @@ export function evaluateDangerous(ctx: HookContext): HookResult {
     patternId: pattern?.id ?? null,
     patternLabel: pattern?.label ?? null,
   });
+  recordAudit(ctx, 'deny', pattern);
   return result;
 }

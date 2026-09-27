@@ -1,6 +1,6 @@
 # Rosetta hooks — enterprise guardrail extensions
 
-This file documents opt-in, enterprise-facing extensions to the `dangerous-actions` hook.
+This file documents two opt-in, enterprise-facing extensions to the `dangerous-actions` hook.
 For the hook runtime itself (adapters, event/tool-kind mapping, the `Rosetta-AI-reviewed`
 marker, pattern shapes) see `src/hooks/src/hooks/dangerous-actions/`.
 
@@ -49,3 +49,46 @@ delays the guardrail decision itself.
 (`runtime/debug-log.ts` is likewise gated behind an explicit `ROSETTA_DEBUG=1`) and with the
 "Zero-Telemetry by Default" posture in `SECURITY.md`. Turn it on explicitly for compliance
 evidence (SOC2/ISO control operation).
+
+## Org policy overlay (F3-3)
+
+`dangerous-actions` patterns can be tuned per organization/project via a `rosetta-policy.json`
+file, resolved with precedence **managed > project > built-in**:
+
+| Layer | Location | Authority |
+|---|---|---|
+| managed | `ROSETTA_POLICY_FILE` env, else `/etc/rosetta/policy.json` (`%ProgramData%\Rosetta\policy.json` on Windows) | full — can add patterns, raise/lower any tier, disable (`"off"`) a built-in pattern id |
+| project | `<repo-root>/.rosetta/policy.json` (nearest `.git` above `cwd`, else `cwd`) | **tighten-only** — can add new patterns freely; can only *raise* an already-effective tier, never lower or disable one |
+
+Schema:
+
+```json
+{
+  "patterns": {
+    "add": [
+      { "id": "vault-delete", "regex": "\\bvault\\s+delete\\b", "tier": "reconsider",
+        "reason": "internal secrets store deletion", "appliesTo": ["bash"] }
+    ],
+    "override": { "rm-rf-root": "block", "ssh-private-key": "off" }
+  }
+}
+```
+
+- `tier`: `advise` | `reconsider` | `block` (added patterns; `off` is override-only).
+- `appliesTo`: `["bash", "content"]` (default) — whether the added pattern is tested against
+  raw shell commands, content written to files, or both.
+- `override`: pattern id → new tier, or `"off"` to disable (managed layer only).
+- **`block`** is a new hard-deny tier, reachable only through policy (there is still no
+  built-in hard-deny — see `dangerous-actions/patterns.ts`). Unlike `reconsider`, the
+  `Rosetta-AI-reviewed` marker is **never** consulted for a `block`-tier match.
+
+**Safety, since org regexes run on every tool call:** each added pattern is compiled at load
+time (a pattern that fails to compile is dropped); a simple nested-quantifier heuristic
+rejects classic catastrophic-backtracking shapes (e.g. `(a+)+`); regex source length and the
+number of added patterns per file are capped. At match time, an org-supplied pattern (added,
+or one that overrode a built-in id) is only tested against a bounded prefix of the candidate
+string — built-in patterns are untouched, since they already carry their own anti-quadratic
+invariants and scaling tests. A missing policy file is normal and silent; a present-but-invalid
+one (bad JSON, wrong shape) is logged once (best-effort, via the existing debug log) and that
+layer's policy is dropped — evaluation always falls back to the other layer / the built-ins,
+never crashes.

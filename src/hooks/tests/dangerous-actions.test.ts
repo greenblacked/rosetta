@@ -9,6 +9,9 @@ import ccMultiEdit from './fixtures/claude-code-pre-tool-use-multi-edit.json';
 import { dangerousActionsHook } from '../src/hooks/dangerous-actions';
 import { runHook } from '../src/runtime/run-hook';
 import { Readable, Writable } from 'stream';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 const toStream = (obj: unknown): Readable => Readable.from([JSON.stringify(obj)]);
 const captureOutput = () => {
@@ -1454,5 +1457,136 @@ describe('F3-2 — IaC / cloud / data-store patterns', () => {
       const r = evaluateDangerous(writeCtx('/proj/scripts/deploy.sh', '#!/bin/sh\nterraform plan\nhelm upgrade my-release ./chart\n'));
       expect(r).toBeNull();
     });
+  });
+});
+
+// --- F3-3 / F3-4 integration through evaluateDangerous ---------------------
+describe('F3-3 org policy — integrated through evaluateDangerous', () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'f3-3-repo-'));
+  fs.mkdirSync(path.join(repoRoot, '.git'));
+  const rosettaDir = path.join(repoRoot, '.rosetta');
+  fs.mkdirSync(rosettaDir);
+  const projectPolicyPath = path.join(rosettaDir, 'policy.json');
+
+  const policyBashCtx = (command: string): HookContext => ({
+    ide: 'claude-code', event: 'PreToolUse', toolKind: 'bash',
+    toolName: 'Bash', filePath: '', cwd: repoRoot, sessionId: null,
+    toolInput: { command },
+  });
+
+  let prevPolicyFile: string | undefined;
+  let prevManagedFile: string | undefined;
+  beforeEach(() => {
+    prevPolicyFile = process.env.ROSETTA_POLICY_FILE;
+    prevManagedFile = process.env.ROSETTA_MANAGED_TEST_UNUSED; // placeholder, kept symmetrical
+    delete process.env.ROSETTA_POLICY_FILE; // no managed file for these project-only cases
+    fs.rmSync(projectPolicyPath, { force: true });
+  });
+  afterEach(() => {
+    if (prevPolicyFile !== undefined) process.env.ROSETTA_POLICY_FILE = prevPolicyFile;
+    else delete process.env.ROSETTA_POLICY_FILE;
+    void prevManagedFile;
+    fs.rmSync(projectPolicyPath, { force: true });
+  });
+
+  test('a project "block"-tier pattern hard-denies even WITH the Rosetta-AI-reviewed marker', () => {
+    fs.writeFileSync(projectPolicyPath, JSON.stringify({
+      patterns: { override: { 'rm-rf-root': 'block' } },
+    }));
+    const withMarker = evaluateDangerous(policyBashCtx('rm -rf /  # Rosetta-AI-reviewed'));
+    expect(withMarker?.kind).toBe('deny');
+    expect((withMarker as { kind: 'deny'; reason: string }).reason).toContain('cannot be overridden');
+  });
+
+  test('a project-added pattern (bash CLI unique to the org) is enforced with the marker still honored (reconsider tier)', () => {
+    fs.writeFileSync(projectPolicyPath, JSON.stringify({
+      patterns: { add: [{ id: 'acme-deploy-force', regex: '\\bacme-deploy\\s+--force\\b', tier: 'reconsider', reason: 'internal deploy tool force flag' }] },
+    }));
+    const denied = evaluateDangerous(policyBashCtx('acme-deploy --force'));
+    expect(denied?.kind).toBe('deny');
+    expect((denied as { kind: 'deny'; reason: string }).reason).toContain('acme-deploy-force');
+
+    const overridden = evaluateDangerous(policyBashCtx('acme-deploy --force  # Rosetta-AI-reviewed'));
+    expect(overridden).toBeNull();
+  });
+
+  test('project cannot relax a built-in pattern — rm -rf / stays denied without the marker', () => {
+    fs.writeFileSync(projectPolicyPath, JSON.stringify({
+      patterns: { override: { 'rm-rf-root': 'off' } },
+    }));
+    const r = evaluateDangerous(policyBashCtx('rm -rf /'));
+    expect(r?.kind).toBe('deny'); // 'off' rejected for project layer, built-in tier kept
+  });
+});
+
+describe('F3-4 audit trail — integrated through evaluateDangerous', () => {
+  const auditFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'f3-4-audit-')), 'audit.jsonl');
+
+  const readAuditRecords = (): Record<string, unknown>[] =>
+    fs.existsSync(auditFile)
+      ? fs.readFileSync(auditFile, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+
+  let prevAuditEnv: string | undefined;
+  let prevPolicyFile: string | undefined;
+  beforeEach(() => {
+    prevAuditEnv = process.env.ROSETTA_AUDIT_LOG;
+    prevPolicyFile = process.env.ROSETTA_POLICY_FILE;
+    delete process.env.ROSETTA_POLICY_FILE;
+    process.env.ROSETTA_AUDIT_LOG = auditFile;
+    fs.rmSync(auditFile, { force: true });
+  });
+  afterEach(() => {
+    if (prevAuditEnv !== undefined) process.env.ROSETTA_AUDIT_LOG = prevAuditEnv;
+    else delete process.env.ROSETTA_AUDIT_LOG;
+    if (prevPolicyFile !== undefined) process.env.ROSETTA_POLICY_FILE = prevPolicyFile;
+    else delete process.env.ROSETTA_POLICY_FILE;
+  });
+
+  test('a soft-deny (reconsider, no marker) records decision "deny"', () => {
+    evaluateDangerous(bashCtx('rm -rf /'));
+    const records = readAuditRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0].decision).toBe('deny');
+    expect(records[0].pattern_id).toBe('rm-rf-root');
+    expect(records[0].hook).toBe('dangerous-actions');
+  });
+
+  test('an override (marker honored) records decision "override"', () => {
+    evaluateDangerous(bashCtx('rm -rf /  # Rosetta-AI-reviewed'));
+    const records = readAuditRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0].decision).toBe('override');
+  });
+
+  test('an advise-tier match records decision "advise"', () => {
+    evaluateDangerous({
+      ide: 'claude-code', event: 'PreToolUse', toolKind: 'write',
+      toolName: 'Write', filePath: '/home/user/.aws/credentials', cwd: '/proj', sessionId: null,
+      toolInput: { file_path: '/home/user/.aws/credentials', content: 'x' },
+    });
+    const records = readAuditRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0].decision).toBe('advise');
+  });
+
+  test('a safe command produces no audit record at all', () => {
+    evaluateDangerous(bashCtx('echo hello'));
+    expect(readAuditRecords()).toHaveLength(0);
+  });
+
+  test('audit records never contain the raw command text', () => {
+    evaluateDangerous(bashCtx('rm -rf /  # Rosetta-AI-reviewed'));
+    const raw = fs.readFileSync(auditFile, 'utf-8');
+    expect(raw).not.toContain('rm -rf /');
+    const records = readAuditRecords();
+    expect(records[0].cmd_sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test('audit is off by default (no ROSETTA_AUDIT_LOG) — no file written', () => {
+    delete process.env.ROSETTA_AUDIT_LOG;
+    fs.rmSync(auditFile, { force: true });
+    evaluateDangerous(bashCtx('rm -rf /'));
+    expect(fs.existsSync(auditFile)).toBe(false);
   });
 });
