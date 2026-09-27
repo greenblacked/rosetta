@@ -46,8 +46,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
+  # Preflight: the agent job below needs the Bifrost gateway secrets. Forks and
+  # repositories without them used to fail the check outright; instead, skip the
+  # agent job (a skipped job counts as passing) and say why in a notice. The
+  # secrets are only tested for presence via env, never printed.
+  preflight:
     if: github.event_name != 'pull_request_target' || github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      bifrost: ${{ steps.check.outputs.bifrost }}
+    steps:
+      - name: Check Bifrost secrets
+        id: check
+        env:
+          BIFROST_HOST_NAME: ${{ secrets.BIFROST_HOST_NAME }}
+          BIFROST_API_KEY: ${{ secrets.BIFROST_API_KEY }}
+        run: |
+          if [ -n "$BIFROST_HOST_NAME" ] && [ -n "$BIFROST_API_KEY" ]; then
+            echo "bifrost=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bifrost=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Prompt validation skipped::BIFROST_HOST_NAME and/or BIFROST_API_KEY are not configured for this repository, so the agent job is skipped. Configure both secrets to enable it."
+            echo "### Prompt validation skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "BIFROST_HOST_NAME and/or BIFROST_API_KEY are not configured; the agent job was skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  validate:
+    needs: preflight
+    if: needs.preflight.outputs.bifrost == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
