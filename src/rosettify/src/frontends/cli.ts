@@ -470,6 +470,26 @@ export async function runCli(args: string[]): Promise<void> {
     }
   });
 
+  // FR-DOC-0001 — doctor: a single top-level command, no subcommands.
+  program
+    .command("doctor")
+    .description("Local, read-only health report: plugin installs, workspace files, plan files, hooks")
+    .option("--root <dir>", "Root directory to scan (default: current working directory)")
+    .option("--ide <names>", "Comma-separated IDE names to restrict install detection to (default: every known IDE)")
+    .option("--compliance", "Add per-install file checksums and a machine-readable compliance summary")
+    .option("--json", "Accepted for compatibility — CLI output is always JSON")
+    .action(async (opts: { root?: string; ide?: string; compliance?: boolean; json?: boolean }) => {
+      const input: DoctorInput = {
+        root: opts.root,
+        ide: opts.ide ? opts.ide.split(",") : undefined,
+        compliance: !!opts.compliance,
+        json: !!opts.json,
+      };
+      const envelope = await dispatch(doctorToolDef, input);
+      writeResult(doctorToolDef.name, envelope);
+      process.exit(envelope.ok ? 0 : 1);
+    });
+
   // Help command
   program
     .command("help")

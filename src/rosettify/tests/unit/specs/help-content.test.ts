@@ -1,7 +1,7 @@
 /**
  * Structural-completeness tests for commands/specs/help-content.ts (FR-SPECS-0060, FR-SPECS-0061).
  * Content-safety (no leaked ids/paths) is covered separately by leakage.test.ts; this file checks
- * shape/coverage only: every required top-level section is present, all 16 subcommands are
+ * shape/coverage only: every required top-level section is present, all 17 subcommands are
  * registered each with the required fields and dual-form examples, and every FR-SPECS-0061 note
  * is present.
  */
@@ -25,6 +25,7 @@ const VALID_SUBCOMMANDS = [
   "render",
   "info",
   "migrate",
+  "trace",
 ] as const;
 
 // FR-SPECS-0061 — the caller-facing behaviors, by distinguishing substring (stable even if exact
@@ -50,6 +51,7 @@ const FR_SPECS_0061_NOTE_TOPICS = [
   "UTC and shown in local time",
   "migrate imports requirement units",
   "single human-readable string",
+  "trace is read-only",
 ];
 
 describe("specsHelpContent — top-level sections present (FR-SPECS-0060)", () => {
@@ -88,9 +90,9 @@ describe("specsHelpContent — top-level sections present (FR-SPECS-0060)", () =
   });
 });
 
-describe("specsHelpContent.subcommands — all 16 registered, each fully specified (FR-SPECS-0060)", () => {
-  it("has exactly 16 subcommand entries", () => {
-    expect(specsHelpContent.subcommands).toHaveLength(16);
+describe("specsHelpContent.subcommands — all 17 registered, each fully specified (FR-SPECS-0060)", () => {
+  it("has exactly 17 subcommand entries", () => {
+    expect(specsHelpContent.subcommands).toHaveLength(17);
   });
 
   it("registers every subcommand name exactly once", () => {

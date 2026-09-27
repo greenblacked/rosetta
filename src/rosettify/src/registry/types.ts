@@ -78,6 +78,30 @@ export interface CommandInput {
   sources?: string[];
   /** query — include Removed specs even without an explicit status:Removed term (FR-SPECS-0011/0012). */
   include_removed?: boolean;
+
+  // specs trace fields (FR-SPECS-0027) — additive.
+  /** trace — source directories to scan (default: the src and tests directories under cwd, or cwd itself). */
+  source_paths?: string[];
+  /** trace — override the default id-matching regular expression. */
+  id_regex?: string;
+  /** trace — allowed id prefixes (default: FR, NFR, INT, DATA). */
+  id_prefixes?: string[];
+  /** trace — glob/substring pattern classifying a scanned file as a test file. */
+  tests_glob?: string;
+  /** trace — file extensions to scan (default: a sensible source/test set). */
+  extensions?: string[];
+  /** trace — when true, the CLI frontend exits non-zero on any uncited/orphan finding (FR-SPECS-0027). */
+  strict?: boolean;
+
+  // doctor fields (FR-DOC-0001) — additive.
+  /** doctor — root directory to scan (default: process cwd). */
+  root?: string;
+  /** doctor — restrict plugin-install detection to these IDE names (default: every known IDE). */
+  ide?: string[];
+  /** doctor — add per-install file checksums and a machine-readable compliance summary (FR-DOC-0006). */
+  compliance?: boolean;
+  /** doctor — accepted for caller compatibility; CLI output is always JSON regardless (FR-CLI-0004). */
+  json?: boolean;
 }
 
 // --- Run Delegate (FR-ARCH-0004) ---
