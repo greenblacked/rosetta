@@ -32,6 +32,7 @@ Validation: Each phase produces verifiable outputs; reviewer catches issues befo
 11. Run architect subagent with required model in the background and consult with it if already supported or prefer advisor if already available
 12. Coding workflow state MUST be saved to `agents/TEMP/<FEATURE>/coding-flow-state.md` file.
 13. If context already contains request for TDD => implement properly red and green adjusting this workflow, including by moving execution of phases `tests` and `review_tests` to be after `user_review_plan` and before `implementation`.
+14. If input is a security remediation task (from `security-flow` package): USE SKILL `security` (remediation-task contract) + `sensitive-data`; treat the task's acceptance criteria as specs input; discovery MUST reproduce the finding before design/implementation; on completion run `security_reverify`.
 
 </prerequisites>
 
@@ -43,8 +44,9 @@ Validation: Each phase produces verifiable outputs; reviewer catches issues befo
 4. Recommended skills: `codemap` (structural project discovery)
 5. If REQUIREMENTS in use: `requirements-use` skill is required.
 6. Additionally request to discover existing libraries, packages, search web for similar problems/tasks (if this make sense)
-7. Update `coding-flow-state.md`
-8. Do not stop until 100% clear
+7. If input is a security remediation task: reproduce the finding locally first; record reproduction evidence; unreproducible → stop and escalate via `hitl`, do not guess a fix.
+8. Update `coding-flow-state.md`
+9. Do not stop until 100% clear
 
 </discovery>
 
@@ -170,6 +172,16 @@ Validation: Each phase produces verifiable outputs; reviewer catches issues befo
 6. Update `coding-flow-state.md`
 
 </final_validation>
+
+<security_reverify phase="14" applies="if input is a security remediation task" subagent="executor" role="Bounded deterministic security-gate operator" subagent_required_model="claude-haiku-4-5, gpt-5.6-terra-low, gemini-3.7-flash-low, composer-2.5, gpt-5.6-luna" must-be-subagent>
+
+1. USE FLOW `security-flow.md` TO APPLY PHASE `security-flow-deterministic-gates.md`, scoped to the task's affected targets only.
+2. Input: the fix diff; the task's finding IDs and acceptance criteria; the original run's authorization scope (reuse it; missing → ask via `hitl`, never silently widen scope).
+3. Output: gate result appended to the task file — `fixed` (CLEAN), `still-open` (HIGH+), or `not-reproduced`.
+4. `fixed` → report in the completion summary, no new gate. `still-open` or `not-reproduced` → reopen `user_review_impl` for re-approval before closing; never close silently.
+5. Update `coding-flow-state.md`.
+
+</security_reverify>
 
 </workflow_phases>
 
