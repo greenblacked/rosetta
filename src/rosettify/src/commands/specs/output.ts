@@ -275,12 +275,17 @@ export interface SpecTraceOrphan {
 }
 
 /** FR-SPECS-0027 — cmdTrace's result. `violated` is strict-mode-only exit-code signaling
- * (kept out of `uncited`/`orphans`, which never change shape based on `strict`). */
+ * (kept out of `uncited`/`orphans`, which never change shape based on `strict`). `skipped_files`
+ * counts every file excluded by either bound (oversize, or cut by the file-count limit);
+ * `truncated` is true specifically when the file-count or directory-count bound was hit, meaning
+ * the scan did not finish visiting the whole tree — `uncited`/`orphans` are then a lower bound,
+ * not a definitive account, and `violated` treats truncation itself as a strict-mode failure. */
 export interface SpecTraceResult {
   specs: SpecTraceEntry[];
   uncited: string[];
   orphans: SpecTraceOrphan[];
   scanned_files: number;
   skipped_files: number;
+  truncated: boolean;
   violated: boolean;
 }

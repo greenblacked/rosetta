@@ -12,6 +12,7 @@ import { readDocWithRetry } from "../../shared/doc-io.js";
 import {
   TRACE_MAX_FILES,
   TRACE_MAX_FILE_SIZE_BYTES,
+  TRACE_MAX_DIRS,
   TRACE_EXCLUDED_DIRS,
   TRACE_DEFAULT_EXTENSIONS,
 } from "../../shared/constants.js";
@@ -25,6 +26,11 @@ export interface TraceOptions {
   testsGlob?: string;
   extensions?: string[];
   strict?: boolean;
+  // Not exposed via the CLI/MCP schema — override the TRACE_MAX_FILES/TRACE_MAX_DIRS bounds
+  // (default when omitted) so truncation behavior can be exercised directly without creating
+  // tens of thousands of fixture files/dirs.
+  maxFiles?: number;
+  maxDirs?: number;
 }
 
 // FR-SPECS-0004 — the id grammar `<PREFIX>-<AREA>-<NNNN>`, PREFIX in FR|NFR|INT|DATA by default.
@@ -66,13 +72,29 @@ function defaultSourceRoots(): string[] {
   return candidates.length > 0 ? candidates : [cwd];
 }
 
-interface WalkState {
+// FR-SPECS-0027 review finding — `skipped_files` counts both an oversize file (examined, but its
+// content not read) and a file the file-count bound cut off (never examined at all); `truncated`
+// separately flags that LATTER case — the scan stopped before visiting the whole tree, so
+// `uncited`/`orphans` are not a definitive account of every citation, whereas an oversize skip
+// alone does not compromise completeness of the directory walk itself. `dirsVisited` bounds the
+// walk independent of file count, so a tree with many directories but few matching files cannot
+// make the scan unbounded in wall time.
+export interface WalkState {
   files: string[];
   skipped: number;
+  truncated: boolean;
+  dirsVisited: number;
 }
 
-function walk(dir: string, extensions: ReadonlySet<string>, state: WalkState, maxFiles: number): void {
-  if (state.files.length >= maxFiles) return;
+// Exported alongside collectFiles purely so directory-level truncation edge cases (a directory
+// entry skipped because the file bound was already exhausted by the time it is reached) can be
+// exercised deterministically in tests, without depending on filesystem readdir ordering.
+export function walk(dir: string, extensions: ReadonlySet<string>, state: WalkState, maxFiles: number, maxDirs: number): void {
+  if (state.dirsVisited >= maxDirs) {
+    state.truncated = true;
+    return;
+  }
+  state.dirsVisited++;
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -80,15 +102,28 @@ function walk(dir: string, extensions: ReadonlySet<string>, state: WalkState, ma
     return; // unreadable directory — skip silently, mirrors best-effort scanning elsewhere
   }
   for (const entry of entries) {
-    if (state.files.length >= maxFiles) return;
     if (entry.isDirectory()) {
       if (TRACE_EXCLUDED_DIRS.has(entry.name)) continue;
-      walk(path.join(dir, entry.name), extensions, state, maxFiles);
+      if (state.files.length >= maxFiles) {
+        // The file bound is already exhausted; stop descending further (cheap: no more readdir
+        // calls), but the walk is not complete, so this is a truncation, not just a skip.
+        state.truncated = true;
+        continue;
+      }
+      walk(path.join(dir, entry.name), extensions, state, maxFiles, maxDirs);
       continue;
     }
     if (!entry.isFile()) continue;
     const ext = path.extname(entry.name).toLowerCase();
     if (!extensions.has(ext)) continue;
+    if (state.files.length >= maxFiles) {
+      // Cut off by the file-count bound (never examined) — counted in skipped_files per
+      // FR-SPECS-0027, and distinctly flagged via `truncated` since, unlike an oversize skip,
+      // it means the scan did not finish visiting every matching file.
+      state.skipped++;
+      state.truncated = true;
+      continue;
+    }
     const full = path.join(dir, entry.name);
     let size: number;
     try {
@@ -104,10 +139,20 @@ function walk(dir: string, extensions: ReadonlySet<string>, state: WalkState, ma
   }
 }
 
-function collectFiles(roots: string[], extensions: ReadonlySet<string>): WalkState {
-  const state: WalkState = { files: [], skipped: 0 };
+/** Exported (with overridable bounds) so the file-count/directory-count truncation behavior can
+ * be exercised directly in tests without creating tens of thousands of fixture files/dirs. */
+export function collectFiles(
+  roots: string[],
+  extensions: ReadonlySet<string>,
+  maxFiles: number = TRACE_MAX_FILES,
+  maxDirs: number = TRACE_MAX_DIRS,
+): WalkState {
+  const state: WalkState = { files: [], skipped: 0, truncated: false, dirsVisited: 0 };
   for (const root of roots) {
-    if (state.files.length >= TRACE_MAX_FILES) break;
+    if (state.files.length >= maxFiles) {
+      state.truncated = true;
+      break;
+    }
     let stat: fs.Stats;
     try {
       stat = fs.statSync(root);
@@ -115,7 +160,7 @@ function collectFiles(roots: string[], extensions: ReadonlySet<string>): WalkSta
       continue;
     }
     if (stat.isDirectory()) {
-      walk(root, extensions, state, TRACE_MAX_FILES);
+      walk(root, extensions, state, maxFiles, maxDirs);
     } else if (stat.isFile()) {
       const ext = path.extname(root).toLowerCase();
       if (extensions.has(ext)) state.files.push(root);
@@ -152,7 +197,12 @@ export async function cmdTrace(
     );
 
     const roots = sourcePaths && sourcePaths.length > 0 ? sourcePaths : defaultSourceRoots();
-    const { files, skipped } = collectFiles(roots, extensions);
+    const { files, skipped, truncated } = collectFiles(
+      roots,
+      extensions,
+      options.maxFiles ?? TRACE_MAX_FILES,
+      options.maxDirs ?? TRACE_MAX_DIRS,
+    );
 
     const definedIds = new Map<string, StatusEnum>();
     for (const spec of doc.specs ?? []) definedIds.set(spec.id, spec.status);
@@ -215,7 +265,11 @@ export async function cmdTrace(
       .sort((a, b) => a.id.localeCompare(b.id));
 
     const strict = !!options.strict;
-    const violated = strict && (uncited.length > 0 || orphans.length > 0);
+    // FR-SPECS-0027 review finding — a truncated scan means uncited/orphans are not a definitive
+    // account of every citation (some matching files were never visited), so --strict treats
+    // truncation itself as a violation rather than silently reporting a possibly-incomplete
+    // "clean" result as passing.
+    const violated = strict && (uncited.length > 0 || orphans.length > 0 || truncated);
 
     const result: SpecTraceResult = {
       specs: specsOut,
@@ -223,10 +277,11 @@ export async function cmdTrace(
       orphans,
       scanned_files: files.length,
       skipped_files: skipped,
+      truncated,
       violated,
     };
     logger.info(
-      { specsFile, scanned: result.scanned_files, uncited: uncited.length, orphans: orphans.length },
+      { specsFile, scanned: result.scanned_files, uncited: uncited.length, orphans: orphans.length, truncated },
       "specs trace",
     );
     return ok(result);
