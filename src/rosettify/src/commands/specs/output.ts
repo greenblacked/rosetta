@@ -249,3 +249,38 @@ export interface SpecMigrateResult {
   warnings: SpecFinding[];
   skipped: SpecSkipped[];
 }
+
+// ---------------------------------------------------------------------------
+// FR-SPECS-0027 — trace result shapes.
+// ---------------------------------------------------------------------------
+
+/** FR-SPECS-0027 — one citation location. */
+export interface SpecTraceRef {
+  file: string;
+  line: number;
+}
+
+/** FR-SPECS-0027 — one defined id's citation summary. */
+export interface SpecTraceEntry {
+  id: string;
+  status: StatusEnum;
+  code_refs: SpecTraceRef[];
+  test_refs: SpecTraceRef[];
+}
+
+/** FR-SPECS-0027 — one id matched while scanning that the document does not define. */
+export interface SpecTraceOrphan {
+  id: string;
+  refs: SpecTraceRef[];
+}
+
+/** FR-SPECS-0027 — cmdTrace's result. `violated` is strict-mode-only exit-code signaling
+ * (kept out of `uncited`/`orphans`, which never change shape based on `strict`). */
+export interface SpecTraceResult {
+  specs: SpecTraceEntry[];
+  uncited: string[];
+  orphans: SpecTraceOrphan[];
+  scanned_files: number;
+  skipped_files: number;
+  violated: boolean;
+}

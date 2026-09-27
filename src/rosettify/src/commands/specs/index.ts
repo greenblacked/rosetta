@@ -22,6 +22,7 @@ import { cmdGraph } from "./graph.js";
 import { cmdRender } from "./render.js";
 import { cmdInfo } from "./info.js";
 import { cmdMigrate } from "./migrate.js";
+import { cmdTrace } from "./trace.js";
 import { specsHelpContent } from "./help-content.js";
 import { ERR_INVALID_DATA, ERR_MISSING_DATA } from "./errors.js";
 import { aggregate } from "./aggregate.js";
@@ -45,6 +46,7 @@ const VALID_SUBCOMMANDS = [
   "render",
   "info",
   "migrate",
+  "trace",
 ] as const;
 
 const VALID_SUBCOMMANDS_STR = VALID_SUBCOMMANDS.join(", ");
@@ -204,6 +206,18 @@ async function runSpecs(input: SpecInput): Promise<RunEnvelope<unknown>> {
       return cmdMigrate(sources, specsFile, actor, system);
     }
 
+    // FR-SPECS-0027 — read-only requirement id <-> code/test citation traceability.
+    case "trace": {
+      if (!specsFile) return err("missing specs_file", true);
+      return cmdTrace(specsFile, input.source_paths, {
+        idRegexSrc: input.id_regex,
+        idPrefixes: input.id_prefixes,
+        testsGlob: input.tests_glob,
+        extensions: input.extensions,
+        strict: input.strict,
+      });
+    }
+
     default:
       return err(`unknown_command: ${subcommand}`, true);
   }
@@ -280,6 +294,33 @@ export const specsToolDef: ToolDef<SpecInput, unknown> = {
       include_removed: {
         type: "boolean",
         description: "query — include Removed specs even without an explicit status:Removed term",
+      },
+      source_paths: {
+        type: "array",
+        items: { type: "string" },
+        description: "trace — source directories to scan (default: the src and tests directories under cwd, or cwd itself)",
+      },
+      id_regex: {
+        type: "string",
+        description: "trace — override the default id-matching regular expression",
+      },
+      id_prefixes: {
+        type: "array",
+        items: { type: "string" },
+        description: "trace — allowed id prefixes (default: FR, NFR, INT, DATA)",
+      },
+      tests_glob: {
+        type: "string",
+        description: "trace — glob/substring pattern classifying a scanned file as a test file",
+      },
+      extensions: {
+        type: "array",
+        items: { type: "string" },
+        description: "trace — file extensions to scan (default: a sensible source/test set)",
+      },
+      strict: {
+        type: "boolean",
+        description: "trace — CLI exits non-zero when any uncited/orphan finding exists",
       },
     },
   },

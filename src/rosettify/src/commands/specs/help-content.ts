@@ -48,6 +48,7 @@ export const specsNotes: string[] = [
   "timestamps are stored in UTC and shown in local time by render and info; get and query return the stored UTC value verbatim",
   "migrate imports requirement units already written in the shape render emits as markup; a unit in any other shape is skipped and reported with the reason, and the rest of that source still imports",
   "every error response is a single human-readable string that aggregates every problem at once — a batch or approval failure names every failing item in one message rather than stopping at the first",
+  "trace is read-only: it scans source/test files for requirement-shaped ids and never writes to the document or any scanned file; its strict flag only changes the CLI exit code, never the reported findings",
 ];
 
 export const specsHelpContent = {
@@ -389,6 +390,29 @@ export const specsHelpContent = {
       examples: {
         tip: "rosettify specs migrate [specs_file] [source-1.md] [source-2.md ...]",
         real: "rosettify specs migrate specs/checkout/specs.json specs/checkout/incoming-requirements.md",
+      },
+    },
+    {
+      name: "trace",
+      brief: "Read-only requirement id <-> code/test citation traceability",
+      usage: "rosettify specs trace <specs_file> [--source <dir>...]",
+      args: {
+        source_paths: "source directories to scan (default: the src and tests directories under cwd, or cwd itself)",
+        id_regex: "override the default id-matching regular expression",
+        id_prefixes: "allowed id prefixes (default: FR, NFR, INT, DATA)",
+        tests_glob: "glob/substring pattern classifying a scanned file as a test file",
+        extensions: "file extensions to scan (default: a sensible source/test set)",
+        strict: "CLI exits non-zero when any uncited/orphan finding exists (never changes the result's shape)",
+      },
+      required: "specs_file is required; every other field is optional",
+      description:
+        "Walks the given (or default) source directories for requirement-shaped ids and cross-references them " +
+        "against this document. uncited lists Approved/Modified ids never cited anywhere scanned; orphans lists " +
+        "ids matched while scanning that this document does not define, each with its citation locations. Makes " +
+        "no network call and writes to no file. Returns SpecTraceResult.",
+      examples: {
+        tip: "rosettify specs trace [specs_file] --source [dir-1] --source [dir-2] --strict",
+        real: "rosettify specs trace specs/checkout/specs.json --source src --source tests",
       },
     },
   ],

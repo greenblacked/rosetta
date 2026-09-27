@@ -73,6 +73,8 @@ export const ERR_MIGRATE_PARSE_ERROR = "migrate_parse_error";
 export const ERR_MISSING_SYSTEM = "missing_system";
 /** FR-SPECS-0002 — a caller-supplied system name disagrees with the document's stored one. */
 export const ERR_SYSTEM_MISMATCH = "system_mismatch";
+/** FR-SPECS-0027 — a caller-supplied trace id_regex does not compile as a regular expression. */
+export const ERR_INVALID_REGEX = "invalid_regex";
 
 /**
  * FR-SPECS-0070 — rename-as-guard write cycle exhausted retries. Shared with `plan` (not
@@ -122,6 +124,7 @@ export const TEMPLATES: Readonly<Record<string, string>> = {
   [ERR_MIGRATE_PARSE_ERROR]: "A migration source contained no parseable spec blocks.",
   [ERR_MISSING_SYSTEM]: "Creating a document requires a system name.",
   [ERR_SYSTEM_MISMATCH]: "The supplied system name does not match the one already stored in this document.",
+  [ERR_INVALID_REGEX]: "The supplied id_regex is not a valid regular expression.",
 };
 
 /** Returns the generic template for a code, or the code itself if it has no authored template. */

@@ -24,3 +24,36 @@ export const SPECS_MAX_EVIDENCE_PER_SPEC = 50;
 export const SPECS_MAX_STRING_LENGTH = 20_000;
 export const SPECS_MAX_NAME_LENGTH = 256;
 export const SPECS_MAX_BATCH_SIZE = 500;
+
+// FR-SPECS-0027 — trace scan bounds (mirrors the size-limit posture of FR-SPECS-0007)
+export const TRACE_MAX_FILES = 20_000;
+export const TRACE_MAX_FILE_SIZE_BYTES = 2_000_000;
+export const TRACE_EXCLUDED_DIRS: ReadonlySet<string> = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  ".git",
+]);
+export const TRACE_DEFAULT_EXTENSIONS: readonly string[] = [
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".go",
+  ".java",
+  ".kt",
+  ".rb",
+  ".rs",
+  ".md",
+  ".mdx",
+];
+
+// FR-DOC-0007 — doctor scan bounds (same exclusion set as trace)
+export const DOCTOR_EXCLUDED_DIRS = TRACE_EXCLUDED_DIRS;
+export const DOCTOR_MAX_PLAN_FILES = 200;
+export const DOCTOR_MAX_COMPLIANCE_FILES_PER_INSTALL = 5_000;
