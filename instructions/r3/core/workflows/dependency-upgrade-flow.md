@@ -11,7 +11,7 @@ baseSchema: docs/schemas/workflow.md
 
 Problem: version bumps and CVE patches need migration research and safe, revertible batching; `modernization-flow`'s heavy analysis and 1-3 file batches do not fit routine dependency work.
 Solution: inventory current versions, research breaking changes, plan dependency-graph-ordered batches, implement and validate one batch at a time with a rollback path, then update dependency docs.
-Validation: each batch builds, tests, and re-scans clean before the next batch starts; a failed batch rolls back without touching later batches.
+Validation: each batch builds, tests, and re-scans against the baseline before the next batch starts; a failed batch rolls back without touching later batches.
 
 </description_and_purpose>
 
@@ -23,7 +23,7 @@ Validation: each batch builds, tests, and re-scans clean before the next batch s
 2. MUST USE SKILL `load-project-context` (required: all), `orchestration` (all except trivial), `hitl` (all, unless `No HITL` or `Fully Autonomous`), `risk-assessment` (registry/network access).
 3. MUST ALWAYS use todo tasks ledger, ASAP. Phases 1-4 are sequential; each Phase 5-6 batch runs one at a time.
 4. Read `docs/DEPENDENCIES.md` if present; if absent, Phase 1 builds a minimal inventory for the affected manifests only — do not run full `init-workspace-flow.md` for this.
-5. Scope is version bumps and CVE patches with at most minimal call-site migration; a request needing rewrite, re-architecture, or language/framework change belongs in `modernization-flow.md` — stop and say so.
+5. Scope is version bumps: any bump within a dependency's or framework's compatible major line (including a framework minor/patch bump, e.g. Spring Boot 3.2 to 3.5) plus CVE patches, each with at most minimal call-site migration. A request crossing a major version, requiring rewrite, re-architecture, or a language/framework change belongs in `modernization-flow.md` — stop and say so.
 6. Workflow state MUST be saved to `agents/TEMP/<FEATURE>/dependency-upgrade-flow-state.md`.
 
 </prerequisites>
@@ -31,8 +31,9 @@ Validation: each batch builds, tests, and re-scans clean before the next batch s
 <inventory phase="1" applies="ALL" subagent="executor" role="Bounded dependency inventory collector" subagent_required_model="claude-haiku-4-5, gpt-5.6-terra-low, gemini-3.7-flash-low, composer-2.5, gpt-5.6-luna">
 
 1. Read `docs/DEPENDENCIES.md`, manifests, lockfiles, and any advisory/CVE input from the request.
-2. Input: request, `docs/DEPENDENCIES.md`, manifests. Output: current-vs-target version table, per-module scope.
-3. Update `dependency-upgrade-flow-state.md`.
+2. Run a baseline audit/CVE scan before any change; Phase 6 compares each batch against it.
+3. Input: request, `docs/DEPENDENCIES.md`, manifests. Output: current-vs-target version table, per-module scope, baseline scan.
+4. Update `dependency-upgrade-flow-state.md`.
 
 </inventory>
 
@@ -71,12 +72,14 @@ Validation: each batch builds, tests, and re-scans clean before the next batch s
 
 </implement_batch>
 
-<validate_batch phase="6" applies="ALL, once per approved batch" subagent="validator" role="Batch validator re-scanning for the patched advisory" subagent_required_model="gpt-5.6-terra-medium, gemini-3.7-flash-high, claude-sonnet-5, grok-4.6">
+<validate_batch phase="6" applies="ALL, once per approved batch" subagent="validator" role="Batch validator re-scanning against the baseline" subagent_required_model="gpt-5.6-terra-medium, gemini-3.7-flash-high, claude-sonnet-5, grok-4.6">
 
-1. Re-run the audit/CVE scan for this batch's dependencies; confirm the target advisory is resolved.
-2. Input: batch diff, build/test result. Output: clean, still-vulnerable, or error, with evidence.
-3. Still-vulnerable or error → stop this batch, return to Phase 5 or escalate via `hitl`; never advance to the next batch on an unresolved advisory.
-4. Update `dependency-upgrade-flow-state.md`.
+1. Re-run the audit/CVE scan for this batch's dependencies and compare against the Phase 1 baseline scan, not an empty scan.
+2. If this batch targets one or more CVEs: confirm each targeted advisory is resolved. Non-CVE version bumps have no target advisory to confirm.
+3. Pass condition: no NEW advisories introduced by this batch, and every targeted advisory (if any) is resolved. Pre-existing advisories unrelated to this batch do not block it.
+4. Input: batch diff, build/test result, baseline scan. Output: clean, still-vulnerable, new-advisory, or error, with evidence.
+5. Still-vulnerable (targeted advisory unresolved) or a new advisory or error → stop this batch, return to Phase 5 or escalate via `hitl`; never advance to the next batch on an unresolved targeted advisory or a newly introduced one.
+6. Update `dependency-upgrade-flow-state.md`.
 
 </validate_batch>
 
@@ -101,7 +104,7 @@ Validation: each batch builds, tests, and re-scans clean before the next batch s
 
 <validation_checklist>
 
-- Every batch builds, tests, and re-scans clean before the next batch starts
+- Every batch builds, tests, and re-scans against the baseline (no new advisories, targeted advisories resolved) before the next batch starts
 - Rollback path recorded and exercised on any batch failure
 - `docs/DEPENDENCIES.md`/`docs/TECHSTACK.md` reflect the final versions
 
@@ -110,7 +113,8 @@ Validation: each batch builds, tests, and re-scans clean before the next batch s
 <pitfalls>
 
 - Bundling unrelated code changes into a version-bump batch
-- Advancing to the next batch with an unresolved advisory
+- Advancing to the next batch with an unresolved targeted advisory or a newly introduced one
+- Blocking a batch on a pre-existing, unrelated advisory the batch never targeted
 - Treating this flow as a substitute for `modernization-flow` on a framework rewrite
 
 </pitfalls>
