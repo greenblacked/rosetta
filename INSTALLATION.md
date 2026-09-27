@@ -724,3 +724,4 @@ After initialization, Rosetta maintains these files in your repository. Read mor
 - [OVERVIEW.md](OVERVIEW.md) - mental model and terminology
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - common issues and fixes
 - [DEPLOYMENT_GUIDE.md](docs/mcp/DEPLOYMENT_GUIDE.md) - org-wide server deployment
+- [docs/enterprise/README.md](docs/enterprise/README.md) - fleet rollout: org instruction layers, internal/air-gapped mirrors, version pin/rollback, managed-settings templates

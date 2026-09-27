@@ -1,0 +1,137 @@
+name: Build Org Plugins
+
+# Manual, on-demand build of an org-layered plugin set (core + <org_domain>) using
+# the local plugin generator (src/rosettify-plugins). Produces the same plugin
+# trees `rosettify-plugins` would from `--domain core,<org_domain>`, packaged as
+# a workflow artifact for the platform team to publish to an internal marketplace
+# mirror (see docs/enterprise/README.md). It never pushes anywhere itself.
+#
+# Requires an org instruction layer to already exist at
+# instructions/<release>/<org_domain>/ (same shape as instructions/<release>/core/:
+# rules/, workflows/, agents/, skills/, configure/, templates/), committed in this
+# repo or a fork/overlay of it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      org_domain:
+        description: >-
+          Org domain name(s) layered over "core" (comma-separated for more than
+          one), matching instructions/<release>/<name>/. Example: "acme" or
+          "acme,acme-eu".
+        type: string
+        required: true
+      release:
+        description: 'Release name (matches instructions/<release>/).'
+        type: string
+        default: 'r3'
+        required: false
+      profile:
+        description: 'Optional build profile name (e.g. "lightweight"). Leave empty for the standard build.'
+        type: string
+        required: false
+      deterministic_hooks:
+        description: 'Override the deterministic_hooks value for the build.'
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-org-plugins-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: src/rosettify-plugins/package-lock.json
+
+      # Inputs are validated and copied to plain shell env vars here (never interpolated as
+      # ${{ ... }} directly inside a run: block below) to keep every later `run:` step free of
+      # untrusted-expression injection.
+      - name: Validate and resolve build inputs
+        env:
+          ORG_DOMAIN_INPUT: ${{ inputs.org_domain }}
+          RELEASE_INPUT: ${{ inputs.release }}
+          PROFILE_INPUT: ${{ inputs.profile }}
+          DETERMINISTIC_HOOKS_INPUT: ${{ inputs.deterministic_hooks }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${ORG_DOMAIN_INPUT}" ]]; then
+            echo "::error::org_domain input is required"
+            exit 1
+          fi
+          if ! [[ "${ORG_DOMAIN_INPUT}" =~ ^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$ ]]; then
+            echo "::error::org_domain must be one or more comma-separated [A-Za-z0-9_-]+ names, got: ${ORG_DOMAIN_INPUT}"
+            exit 1
+          fi
+          if [[ "${ORG_DOMAIN_INPUT}" == *"core"* ]]; then
+            echo "::error::org_domain must not include \"core\" — it is always layered first automatically"
+            exit 1
+          fi
+
+          release="${RELEASE_INPUT:-r3}"
+          if ! [[ "${release}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::release must be a single [A-Za-z0-9_-]+ token, got: ${release}"
+            exit 1
+          fi
+
+          profile="${PROFILE_INPUT:-}"
+          if [[ -n "${profile}" ]] && ! [[ "${profile}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::profile must be a single [A-Za-z0-9_-]+ token, got: ${profile}"
+            exit 1
+          fi
+
+          {
+            echo "domain=core,${ORG_DOMAIN_INPUT}"
+            echo "release=${release}"
+            echo "profile=${profile}"
+            echo "deterministic_hooks=${DETERMINISTIC_HOOKS_INPUT:-false}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Install rosettify-plugins dependencies
+        working-directory: src/rosettify-plugins
+        run: npm ci
+
+      - name: Build rosettify-plugins CLI
+        working-directory: src/rosettify-plugins
+        run: npm run build
+
+      - name: Build org plugin set
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/org-plugins-out"
+          args=(
+            --release "${release}"
+            --domain "${domain}"
+            --output "${RUNNER_TEMP}/org-plugins-out"
+            --deterministic-hooks "${deterministic_hooks}"
+          )
+          if [[ -n "${profile}" ]]; then
+            args+=(--profile "${profile}")
+          fi
+          node src/rosettify-plugins/dist/cli.js "${args[@]}"
+
+      - name: Upload org plugin set artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: org-plugins-${{ github.run_id }}
+          path: ${{ runner.temp }}/org-plugins-out
+          retention-days: 14
+          if-no-files-found: error

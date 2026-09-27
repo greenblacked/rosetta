@@ -1,0 +1,10 @@
+{
+  "_comment": "Rosetta enterprise rollout template for Claude Code. Fields below are verified against instructions/r3/core/configure/claude-code.md and PLUGINS.md/INSTALLATION.md in this repo (see docs/enterprise/README.md). Commit this as .claude/settings.json in a repo, or use it as the body of an OS-level managed-settings.json once you have confirmed that file's path and precedence against Anthropic's current vendor docs (unverified here — see the README).",
+  "extraKnownMarketplaces": [
+    "https://github.com/your-org/rosetta-marketplace-mirror"
+  ],
+  "strictKnownMarketplaces": true,
+  "enabledPlugins": [
+    "rosetta@rosetta-marketplace-mirror"
+  ]
+}
