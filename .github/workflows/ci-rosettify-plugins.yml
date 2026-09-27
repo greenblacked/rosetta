@@ -49,3 +49,14 @@ jobs:
     - name: Run tests
       working-directory: ./src/rosettify-plugins
       run: npm run test
+
+    # FR-CLI-0070–0074: deterministic instruction linter. Runs after build so dist/cli.js exists;
+    # lints r3 standard and lightweight-profile alike, from the repo's own instructions/ tree.
+    # Exit 1 (findings) or 2 (usage error) fails this step; see src/rosettify-plugins/src/lint/.
+    - name: Lint r3 instructions (standard profile)
+      working-directory: ./src/rosettify-plugins
+      run: node dist/cli.js --lint --release r3 --source ../..
+
+    - name: Lint r3 instructions (lightweight profile)
+      working-directory: ./src/rosettify-plugins
+      run: node dist/cli.js --lint --release r3 --profile lightweight --source ../..
