@@ -75,8 +75,15 @@ export function validateCasesAgainstTargets(config: RouteConfig, targets: RouteT
   const unknown = config.cases
     .map((routeCase) => ({ id: routeCase.id, key: `${routeCase.expect.kind}:${routeCase.expect.name}` }))
     .filter(({ key }) => !known.has(key));
+  for (const routeCase of config.cases) {
+    for (const forbidKey of routeCase.forbid ?? []) {
+      if (!known.has(forbidKey)) {
+        unknown.push({ id: routeCase.id, key: `${forbidKey} (forbid)` });
+      }
+    }
+  }
   if (unknown.length > 0) {
-    const list = unknown.map(({ id, key }) => `  - case "${id}": expect "${key}" is not a known target`).join('\n');
+    const list = unknown.map(({ id, key }) => `  - case "${id}": "${key}" is not a known target`).join('\n');
     throw new Error(
       `Routing config references unknown targets (not found in the resolved context):\n${list}\n` +
         `Known targets: ${[...known].sort().join(', ') || '(none)'}`,

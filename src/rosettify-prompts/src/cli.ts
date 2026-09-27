@@ -325,6 +325,11 @@ program
   .option('-o, --out <dir>', 'output directory for the report (default: results/route-<timestamp>)')
   .option('--baseline <path>', 'a previous route-report.json to compare accuracy against')
   .option(
+    '--force-baseline',
+    'compare against --baseline even if it was run against a different model or case set',
+    false,
+  )
+  .option(
     '--max-accuracy-drop <pct>',
     'fail (exit 1) if accuracy drops more than this many percentage points vs --baseline (default: 5)',
     (value: string) => {
@@ -336,6 +341,11 @@ program
     },
     5,
   )
+  .option(
+    '--allow-errors',
+    'do not fail (exit 1) when one or more attempts errored (API failure, forced tool_choice/thinking rejected, etc.)',
+    false,
+  )
   .option('--dry-run', 'validate config/context and print the planned jobs without calling the API', false)
   .action(async (opts: {
     config: string;
@@ -344,7 +354,9 @@ program
     concurrency?: number;
     out?: string;
     baseline?: string;
+    forceBaseline: boolean;
     maxAccuracyDrop: number;
+    allowErrors: boolean;
     dryRun: boolean;
   }) => {
     const config = loadRouteConfig(opts.config);
@@ -376,9 +388,9 @@ program
       console.log(`[${done}/${total}] ${attempt.caseId}#${attempt.repetition} — expected ${attempt.expected.kind}:${attempt.expected.name}, got ${actual} — ${status}`);
     });
 
-    let report = buildRouteReport(opts.context, config.model, router.targets, attempts);
+    let report = buildRouteReport(opts.context, config.model, router.targets, attempts, config.repetitions);
     if (opts.baseline) {
-      report = compareToBaseline(report, opts.baseline, opts.maxAccuracyDrop);
+      report = compareToBaseline(report, opts.baseline, opts.maxAccuracyDrop, opts.forceBaseline);
     }
 
     const outDir =
@@ -386,8 +398,23 @@ program
     const { jsonPath, markdownPath } = writeRouteReportFiles(report, outDir);
 
     console.log('');
-    console.log(`Accuracy: ${(report.accuracy * 100).toFixed(1)}% (${report.correctAttempts}/${report.totalAttempts})`);
+    console.log(
+      `Accuracy: ${(report.accuracy * 100).toFixed(1)}% (${report.correctAttempts}/${report.totalAttempts - report.erroredAttempts} scored attempts)`,
+    );
     console.log(`Report written to:\n  ${jsonPath}\n  ${markdownPath}`);
+
+    // Errored attempts (API failure, a model rejecting forced tool_choice/thinking:disabled, etc.)
+    // are excluded from accuracy above, but a run with errors is not a trustworthy result on its
+    // own — fail by default so it's not silently reported as a real (possibly 0%) accuracy.
+    if (report.erroredAttempts > 0) {
+      console.error(
+        `${report.erroredAttempts}/${report.totalAttempts} attempt(s) errored (see the report for details).`,
+      );
+      if (!opts.allowErrors) {
+        console.error('Pass --allow-errors to treat this as non-fatal.');
+        process.exitCode = 1;
+      }
+    }
 
     if (report.baseline?.regression) {
       console.error(

@@ -94,6 +94,30 @@ describe('route-context: loadRouterContext', () => {
     mkdirSync(path.join(dir, 'skills'), { recursive: true });
     expect(() => loadRouterContext(dir)).toThrow(/No routable/);
   });
+
+  it('skips raw `~`-directive filename variants so they never duplicate the base target', () => {
+    const dir = buildFixtureContext();
+    // Mirrors instructions/r3/core/workflows/coding-flow~profile-lightweight-only~overwrite~.md
+    // alongside the already-present coding-flow.md from buildFixtureContext().
+    writeFileSync(
+      path.join(dir, 'workflows', 'coding-flow~profile-lightweight-only~overwrite~.md'),
+      '---\nname: coding-flow\ndescription: About coding-flow\ntags: ["workflow"]\n---\n\nLightweight variant.\n',
+    );
+    const ctx = loadRouterContext(dir);
+    const codingFlowTargets = ctx.targets.filter((t) => t.kind === 'workflow' && t.name === 'coding-flow');
+    expect(codingFlowTargets).toHaveLength(1);
+  });
+
+  it('throws a clear error on a true duplicate target with conflicting descriptions', () => {
+    const dir = buildFixtureContext();
+    // A second workflow file that resolves to the same routable name as an existing one, but with
+    // a conflicting description — a real content conflict, not a filename-directive artifact.
+    writeFileSync(
+      path.join(dir, 'workflows', 'coding-flow-2.md'),
+      '---\nname: coding-flow\ndescription: A conflicting description\ntags: ["workflow"]\n---\n\nConflict.\n',
+    );
+    expect(() => loadRouterContext(dir)).toThrow(/Duplicate route target "workflow:coding-flow"/);
+  });
 });
 
 describe('route-config: parseRouteConfig / loadRouteConfig', () => {
@@ -180,6 +204,38 @@ describe('route-config: validateCasesAgainstTargets', () => {
     );
     expect(() => validateCasesAgainstTargets(config, targets)).toThrow(/typo-case/);
     expect(() => validateCasesAgainstTargets(config, targets)).toThrow(/wrong-kind/);
+  });
+
+  it('rejects a forbid entry naming an unknown target', () => {
+    const config = parseRouteConfig(
+      minimalRouteConfig({
+        cases: [
+          {
+            id: 'c1',
+            prompt: 'x',
+            expect: { kind: 'workflow', name: 'coding-flow' },
+            forbid: ['skill:no-such-skill'],
+          },
+        ],
+      } as never),
+    );
+    expect(() => validateCasesAgainstTargets(config, targets)).toThrow(/skill:no-such-skill/);
+  });
+
+  it('accepts a forbid entry naming a known target', () => {
+    const config = parseRouteConfig(
+      minimalRouteConfig({
+        cases: [
+          {
+            id: 'c1',
+            prompt: 'x',
+            expect: { kind: 'workflow', name: 'coding-flow' },
+            forbid: ['skill:planning'],
+          },
+        ],
+      } as never),
+    );
+    expect(() => validateCasesAgainstTargets(config, targets)).not.toThrow();
   });
 });
 
@@ -318,7 +374,7 @@ describe('route-runner: runRouteEval', () => {
 });
 
 describe('route-report: buildRouteReport', () => {
-  it('computes overall accuracy, per-case accuracy, and a confusion matrix', () => {
+  it('computes overall accuracy (excluding errored attempts), per-case accuracy, and a confusion matrix', () => {
     const attempts = [
       {
         caseId: 'c1',
@@ -327,6 +383,7 @@ describe('route-report: buildRouteReport', () => {
         expected: { kind: 'workflow' as const, name: 'coding-flow' },
         actual: { kind: 'workflow' as const, name: 'coding-flow' },
         correct: true,
+        forbiddenHit: false,
         latencyMs: 10,
         inputTokens: 1,
         outputTokens: 1,
@@ -339,6 +396,7 @@ describe('route-report: buildRouteReport', () => {
         expected: { kind: 'workflow' as const, name: 'testgen-flow' },
         actual: { kind: 'workflow' as const, name: 'coding-flow' },
         correct: false,
+        forbiddenHit: false,
         latencyMs: 10,
         inputTokens: 1,
         outputTokens: 1,
@@ -351,6 +409,7 @@ describe('route-report: buildRouteReport', () => {
         expected: { kind: 'workflow' as const, name: 'testgen-flow' },
         actual: null,
         correct: false,
+        forbiddenHit: false,
         error: 'boom',
         latencyMs: 10,
         inputTokens: 0,
@@ -359,27 +418,54 @@ describe('route-report: buildRouteReport', () => {
       },
     ];
 
-    const report = buildRouteReport('plugins/core-claude', 'claude-haiku-4-5', TARGETS, attempts);
+    const report = buildRouteReport('plugins/core-claude', 'claude-haiku-4-5', TARGETS, attempts, 1);
 
     expect(report.totalAttempts).toBe(3);
     expect(report.correctAttempts).toBe(1);
-    expect(report.accuracy).toBeCloseTo(1 / 3);
+    expect(report.erroredAttempts).toBe(1);
+    // Errored attempt excluded from the denominator: 1 correct out of 2 scored attempts, not 3.
+    expect(report.accuracy).toBeCloseTo(1 / 2);
+    expect(report.repetitions).toBe(1);
+    expect(report.caseIdsHash).toEqual(expect.any(String));
 
     const c1 = report.cases.find((c) => c.caseId === 'c1')!;
     expect(c1.accuracy).toBe(1);
+    expect(c1.errored).toBe(0);
     const c2 = report.cases.find((c) => c.caseId === 'c2')!;
+    expect(c2.errored).toBe(1);
+    // 0 correct out of 1 scored (non-errored) attempt for c2.
     expect(c2.accuracy).toBe(0);
     expect(c2.actualBreakdown).toEqual({ 'workflow:coding-flow': 1, '(error)': 1 });
 
-    // Confusion matrix: two attempts expected testgen-flow but one landed on coding-flow, one errored.
+    // Confusion matrix excludes the errored attempt: only the non-error mis-route is counted.
     const testgenToCoding = report.confusionMatrix.find(
       (e) => e.expectedKey === 'workflow:testgen-flow' && e.actualKey === 'workflow:coding-flow',
     );
     expect(testgenToCoding?.count).toBe(1);
-    const testgenToError = report.confusionMatrix.find(
-      (e) => e.expectedKey === 'workflow:testgen-flow' && e.actualKey === '(error)',
-    );
-    expect(testgenToError?.count).toBe(1);
+    const testgenToError = report.confusionMatrix.find((e) => e.actualKey === '(error)');
+    expect(testgenToError).toBeUndefined();
+  });
+
+  it('counts forbiddenHit attempts per case without affecting correctness', () => {
+    const attempts = [
+      {
+        caseId: 'c1',
+        repetition: 0,
+        prompt: 'p1',
+        expected: { kind: 'workflow' as const, name: 'coding-flow' },
+        actual: { kind: 'skill' as const, name: 'planning' },
+        correct: false,
+        forbiddenHit: true,
+        latencyMs: 10,
+        inputTokens: 1,
+        outputTokens: 1,
+        costUsd: 0.001,
+      },
+    ];
+    const report = buildRouteReport('plugins/core-claude', 'claude-haiku-4-5', TARGETS, attempts, 1);
+    const c1 = report.cases.find((c) => c.caseId === 'c1')!;
+    expect(c1.forbiddenHits).toBe(1);
+    expect(c1.correct).toBe(0);
   });
 
   it('renders a markdown report with accuracy, per-case table, and confusion matrix sections', () => {
@@ -391,13 +477,14 @@ describe('route-report: buildRouteReport', () => {
         expected: { kind: 'workflow' as const, name: 'coding-flow' },
         actual: { kind: 'workflow' as const, name: 'coding-flow' },
         correct: true,
+        forbiddenHit: false,
         latencyMs: 10,
         inputTokens: 1,
         outputTokens: 1,
         costUsd: 0.001,
       },
     ];
-    const report = buildRouteReport('plugins/core-claude', 'claude-haiku-4-5', TARGETS, attempts);
+    const report = buildRouteReport('plugins/core-claude', 'claude-haiku-4-5', TARGETS, attempts, 1);
     const md = renderRouteMarkdownReport(report);
     expect(md).toContain('# rosettify-prompts route report');
     expect(md).toContain('## Accuracy');
@@ -408,10 +495,10 @@ describe('route-report: buildRouteReport', () => {
 });
 
 describe('route-report: compareToBaseline', () => {
-  function reportWithAccuracy(accuracy: number) {
+  function reportWithAccuracy(accuracy: number, model = 'claude-haiku-4-5') {
     return buildRouteReport(
       'plugins/core-claude',
-      'claude-haiku-4-5',
+      model,
       TARGETS,
       Array.from({ length: 10 }, (_, i) => ({
         caseId: `c${i}`,
@@ -420,11 +507,13 @@ describe('route-report: compareToBaseline', () => {
         expected: { kind: 'workflow' as const, name: 'coding-flow' },
         actual: i < accuracy * 10 ? { kind: 'workflow' as const, name: 'coding-flow' } : { kind: 'workflow' as const, name: 'testgen-flow' },
         correct: i < accuracy * 10,
+        forbiddenHit: false,
         latencyMs: 1,
         inputTokens: 1,
         outputTokens: 1,
         costUsd: 0.0001,
       })),
+      1,
     );
   }
 
@@ -462,5 +551,107 @@ describe('route-report: compareToBaseline', () => {
     writeFileSync(baselinePath, JSON.stringify({ notAReport: true }));
     const candidate = reportWithAccuracy(0.9);
     expect(() => compareToBaseline(candidate, baselinePath, 5)).toThrow(/no numeric "accuracy" field/);
+  });
+
+  it('refuses a baseline run against a different model', () => {
+    const dir = makeTmpDir();
+    const baselinePath = path.join(dir, 'baseline.json');
+    writeFileSync(baselinePath, JSON.stringify(reportWithAccuracy(0.9, 'claude-opus-4-8')));
+    const candidate = reportWithAccuracy(0.9, 'claude-haiku-4-5');
+    expect(() => compareToBaseline(candidate, baselinePath, 5)).toThrow(/model differs/);
+  });
+
+  it('refuses a baseline run against a different case set', () => {
+    const dir = makeTmpDir();
+    const baselinePath = path.join(dir, 'baseline.json');
+    writeFileSync(baselinePath, JSON.stringify(reportWithAccuracy(0.9)));
+    const differentCases = buildRouteReport(
+      'plugins/core-claude',
+      'claude-haiku-4-5',
+      TARGETS,
+      [
+        {
+          caseId: 'totally-different-case',
+          repetition: 0,
+          prompt: 'p',
+          expected: { kind: 'workflow' as const, name: 'coding-flow' },
+          actual: { kind: 'workflow' as const, name: 'coding-flow' },
+          correct: true,
+          forbiddenHit: false,
+          latencyMs: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          costUsd: 0.0001,
+        },
+      ],
+      1,
+    );
+    expect(() => compareToBaseline(differentCases, baselinePath, 5)).toThrow(/case set differs/);
+  });
+
+  it('--force-baseline compares anyway and records the incompatibility on the report', () => {
+    const dir = makeTmpDir();
+    const baselinePath = path.join(dir, 'baseline.json');
+    writeFileSync(baselinePath, JSON.stringify(reportWithAccuracy(0.9, 'claude-opus-4-8')));
+    const candidate = reportWithAccuracy(0.9, 'claude-haiku-4-5');
+    const compared = compareToBaseline(candidate, baselinePath, 5, true);
+    expect(compared.baseline?.regression).toBe(false);
+    expect(compared.baseline?.incompatibilities).toEqual(expect.arrayContaining([expect.stringMatching(/model differs/)]));
+  });
+
+  it('does not refuse a baseline missing model/caseIdsHash fields (older report shape)', () => {
+    const dir = makeTmpDir();
+    const baselinePath = path.join(dir, 'baseline.json');
+    writeFileSync(baselinePath, JSON.stringify({ accuracy: 0.9 }));
+    const candidate = reportWithAccuracy(0.9);
+    expect(() => compareToBaseline(candidate, baselinePath, 5)).not.toThrow();
+  });
+});
+
+describe('route-runner: forbid scoring', () => {
+  it('flags forbiddenHit when the selection matches a forbid entry, still scored incorrect', async () => {
+    const client = {
+      messages: fakeMessages(async () => toolResponse('skill:planning')),
+    } as unknown as Anthropic;
+    const config = parseRouteConfig(
+      minimalRouteConfig({
+        cases: [
+          {
+            id: 'c1',
+            prompt: 'fix a bug please',
+            expect: { kind: 'workflow', name: 'coding-flow' },
+            forbid: ['skill:planning'],
+          },
+        ],
+      } as never),
+    );
+
+    const [attempt] = await runRouteEval(client, config, TARGETS, null);
+
+    expect(attempt.correct).toBe(false);
+    expect(attempt.forbiddenHit).toBe(true);
+  });
+
+  it('does not flag forbiddenHit for a wrong selection outside the forbid list', async () => {
+    const client = {
+      messages: fakeMessages(async () => toolResponse('workflow:testgen-flow')),
+    } as unknown as Anthropic;
+    const config = parseRouteConfig(
+      minimalRouteConfig({
+        cases: [
+          {
+            id: 'c1',
+            prompt: 'fix a bug please',
+            expect: { kind: 'workflow', name: 'coding-flow' },
+            forbid: ['skill:planning'],
+          },
+        ],
+      } as never),
+    );
+
+    const [attempt] = await runRouteEval(client, config, TARGETS, null);
+
+    expect(attempt.correct).toBe(false);
+    expect(attempt.forbiddenHit).toBe(false);
   });
 });

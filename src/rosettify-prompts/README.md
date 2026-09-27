@@ -212,6 +212,13 @@ npx -y rosettify-prompts@latest route \
 - Every top-level workflow file (`tags: ["workflow"]`, not a phase file) becomes a
   `workflow:<name>` target. Phase files (e.g. `testgen-flow-question-generation.md`) are
   excluded automatically.
+- Raw filename-directive variants (e.g.
+  `coding-flow~profile-lightweight-only~overwrite~.md`, see
+  `src/rosettify-plugins/src/vfs/directives.ts`) are skipped when pointing `--context` at
+  a source instructions directory (e.g. `instructions/r3/core`) rather than a built
+  `plugins/*` directory — otherwise the variant and its base file would both resolve to
+  the same `kind:name` target. Any other true duplicate (two files resolving to the same
+  `kind:name` with different descriptions) is a real content conflict and fails loudly.
 
 A routing config is JSON with a list of cases:
 
@@ -224,15 +231,20 @@ A routing config is JSON with a list of cases:
     {
       "id": "coding-fix-bug",
       "prompt": "There's a bug where checkout throws a null pointer on an empty cart. Fix it.",
-      "expect": { "kind": "workflow", "name": "coding-flow" }
+      "expect": { "kind": "workflow", "name": "coding-flow" },
+      // Optional: target keys this case must NOT select. Landing on one is already an
+      // incorrect attempt (it isn't `expect`), but it's flagged/counted separately
+      // (`forbiddenHits`) so a confusable description shows up without reading the
+      // confusion matrix by hand.
+      "forbid": ["skill:planning"]
     }
   ]
 }
 ```
 
-`route --config <path>` cross-checks every case's `expect` against the resolved
-`--context` targets before making any API call, so a typo (e.g. `codnig-flow`) fails
-fast with the exact case id and the list of known targets.
+`route --config <path>` cross-checks every case's `expect` (and `forbid` entries)
+against the resolved `--context` targets before making any API call, so a typo (e.g.
+`codnig-flow`) fails fast with the exact case id and the list of known targets.
 
 `tests/routing/routes.sample.json` in this package seeds ~10 cases against
 `plugins/core-claude`'s current workflows and skills. Use it as a template, not as the
@@ -241,15 +253,28 @@ schema.
 Output (`route-report.json` + `route-report.md` under `--out`, default
 `results/route-<timestamp>`):
 
-- **Accuracy**: overall correct/total across all `(case, repetition)` attempts.
-- **Per-case results**: each case's own accuracy plus a breakdown of what was actually
-  selected across its repetitions (`(no selection)` for a malformed/missing tool call,
-  `(error)` for a failed API call after retries).
-- **Confusion matrix**: `expected -> actual` counts, so you can see which descriptions
-  are stealing traffic from which.
-- **Baseline comparison** (with `--baseline`): delta in percentage points against a
-  prior `route-report.json`'s accuracy, and whether it exceeds `--max-accuracy-drop`
-  (default 5pp) — the command exits 1 on a regression.
+- **Accuracy**: correct/scored across all `(case, repetition)` attempts. **Errored**
+  attempts (a failed API call after retries, a model that rejects the forced
+  `tool_choice`/`thinking: disabled` combination, etc.) are an API/model failure, not a
+  routing mistake, so they're reported separately (`erroredAttempts`) and excluded from
+  the accuracy denominator, instead of silently counting as incorrect and dragging
+  accuracy toward 0%.
+- By default, `route` **exits non-zero if any attempt errored**, so a systemic failure
+  (e.g. every call rejecting `thinking: disabled`) can't be mistaken for a real (possibly
+  0%) accuracy number. Pass `--allow-errors` to treat errored attempts as non-fatal.
+- **Per-case results**: each case's own accuracy (over its non-errored attempts), its
+  errored count, its `forbiddenHits` count, and a breakdown of what was actually selected
+  across its repetitions (`(no selection)` for a malformed/missing tool call, `(error)`
+  for a failed attempt).
+- **Confusion matrix**: `expected -> actual` counts over non-errored attempts, so you can
+  see which descriptions are stealing traffic from which.
+- **Baseline comparison** (with `--baseline`): delta in percentage points against a prior
+  `route-report.json`'s accuracy, and whether it exceeds `--max-accuracy-drop` (default
+  5pp) — the command exits 1 on a regression. The report also records `model`,
+  `repetitions`, and a `caseIdsHash` fingerprint of the case set; `route` **refuses to
+  compare against a baseline run with a different model or case set** (an accuracy delta
+  between two incomparable runs is meaningless) unless `--force-baseline` is passed, in
+  which case the mismatch is recorded on the report instead of failing the command.
 
 ## Writing a config
 
