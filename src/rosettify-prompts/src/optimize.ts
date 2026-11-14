@@ -840,7 +840,12 @@ export function renderOptimizeReport(trace: OptimizeTrace): string {
     }))
     .join('\n');
   const totals = totalUsage(allCallStats(trace));
-  const escapeCell = (text: string): string => text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim();
+  // Backslashes first, so an input `\|` cannot turn back into a bare cell break.
+  const escapeCell = (text: string): string => text
+    .replace(/\r?\n/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .trim();
   const questionRows = trace.phases
     .flatMap((phase) => phase.prompts.flatMap((prompt) => (prompt.questions ?? []).map((record) => (
       `| ${prompt.step} | ${escapeCell(record.question)} | ${record.skipped ? '(skipped)' : escapeCell(record.answer)} |`

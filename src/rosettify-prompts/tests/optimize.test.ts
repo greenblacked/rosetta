@@ -726,6 +726,30 @@ describe('optimize prompts', () => {
     expect(report).toContain('(skipped)');
   });
 
+  it('escapes backslashes before pipes in the Questions & Answers table', async () => {
+    const calls: OptimizeCall[] = [];
+    const log: AskInvocation[] = [];
+    const { outDir, target } = await tempWorkspace();
+
+    const result = await runPromptOptimization(
+      fakeClient(calls, ['SKILL.md'], {
+        1: [{ id: 'q1', question: 'Keep a\\|b together?' }],
+      }),
+      {
+        targetPaths: [target],
+        outDir,
+        model: 'claude-test',
+        maxOutputTokens: 2048,
+        enableQuestions: true,
+        askQuestions: fakeAsker({ q1: 'C:\\tmp | done' }, log),
+      },
+    );
+
+    const report = await readFile(result.files!.reportPath, 'utf-8');
+    // a\|b must render as a\\\|b (escaped backslash, escaped pipe), never a\\|b (a cell break).
+    expect(report).toContain('| Keep a\\\\\\|b together? | C:\\\\tmp \\| done |');
+  });
+
   it('never re-asks a question by id or by identical text across steps', async () => {
     const calls: OptimizeCall[] = [];
     const log: AskInvocation[] = [];
