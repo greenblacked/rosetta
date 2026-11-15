@@ -413,6 +413,8 @@ jobs:
 
       - name: Generate PR comment
         if: always() && env.TARGET_PR_NUMBER != '' && steps.changed-files.outputs.count > 0
+        env:
+          HAS_HIGH: ${{ steps.validate.outputs.has_high_severity }}
         run: |
           REPORTABLE_RESULTS=$(jq '[.[] | select(.error or ((.issues // []) | length > 0))]' "$ALL_RESULTS_FILE")
           REPORTABLE_COUNT=$(echo "$REPORTABLE_RESULTS" | jq 'length')
@@ -420,7 +422,7 @@ jobs:
           cat > "$FULL_REPORT_FILE" <<EOF
           ## Prompt Quality Validation Report
 
-          $( [ "${{ steps.validate.outputs.has_high_severity }}" = "true" ] && echo "Validation failed: high-severity issues found." || echo "Validation completed without high-severity issues." )
+          $( [ "$HAS_HIGH" = "true" ] && echo "Validation failed: high-severity issues found." || echo "Validation completed without high-severity issues." )
 
           ### Changed Files
 
@@ -507,7 +509,7 @@ jobs:
           cat > "$PR_COMMENT_FILE" <<EOF
           ## :clipboard: Prompt Quality Validation Report
 
-          $( [ "${{ steps.validate.outputs.has_high_severity }}" = "true" ] && echo "### :x: Validation Failed" || echo "### :white_check_mark: Validation Passed" )
+          $( [ "$HAS_HIGH" = "true" ] && echo "### :x: Validation Failed" || echo "### :white_check_mark: Validation Passed" )
 
           The full markdown report and raw JSON output are available in the workflow artifacts for 5 days.
           EOF
@@ -614,10 +616,13 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          CHANGED_COUNT: ${{ steps.changed-files.outputs.count }}
+          HAS_HIGH: ${{ steps.validate.outputs.has_high_severity }}
         run: |
           cat >> $GITHUB_STEP_SUMMARY <<EOF
           ## Prompt Validation Summary
 
-          - **Files validated:** ${{ steps.changed-files.outputs.count }}
-          - **Status:** $( [ "${{ steps.validate.outputs.has_high_severity }}" = "true" ] && echo ":x: Failed" || echo ":white_check_mark: Passed" )
+          - **Files validated:** ${CHANGED_COUNT}
+          - **Status:** $( [ "$HAS_HIGH" = "true" ] && echo ":x: Failed" || echo ":white_check_mark: Passed" )
           EOF

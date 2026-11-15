@@ -45,6 +45,9 @@ on:
           - claude
         default: codex
 
+# Every job declares its own permissions; nothing inherits the repository default.
+permissions: {}
+
 jobs:
   # Preflight: this pipeline needs the Bifrost gateway secrets (agent job) and the
   # project-board token (board load + claims). Forks and repositories without them
@@ -83,6 +86,9 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.enabled == 'true'
     runs-on: ubuntu-latest
+    # Checkout only; board reads and claims use SELF_AUTOMATION_PROJECTS_TOKEN.
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.load.outputs.impl_matrix }}
       has_work: ${{ steps.load.outputs.has_impl }}
@@ -123,12 +129,15 @@ jobs:
         run: python .github/scripts/load_stories.py
 
       - name: Summary
+        env:
+          BUSY: ${{ steps.inflight.outputs.busy }}
+          IMPL_COUNT: ${{ steps.load.outputs.impl_count }}
         run: |
           echo "## Implementer — Board Load" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.inflight.outputs.busy }}" = "true" ]; then
+          if [ "$BUSY" = "true" ]; then
             echo "- Skipped: another implementer run is in progress" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- Issues to implement: ${{ steps.load.outputs.impl_count }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Issues to implement: ${IMPL_COUNT}" >> $GITHUB_STEP_SUMMARY
           fi
 
   # ── Implementation subagents (parallel, one per issue) ────────────────────────
