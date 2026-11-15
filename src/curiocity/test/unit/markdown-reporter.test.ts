@@ -85,6 +85,12 @@ describe('cell() — Markdown table-cell escaping helper', () => {
     expect(cell('a | b || c')).toBe('a \\| b \\|\\| c');
   });
 
+  it('escapes backslashes before pipes so an escaped pipe in the input stays inside the cell', () => {
+    // Input a\|b: without the backslash escape this became a\\|b, a literal backslash then a cell break.
+    expect(cell('a\\|b')).toBe('a\\\\\\|b');
+    expect(cell('C:\\path\\to')).toBe('C:\\\\path\\\\to');
+  });
+
   it('collapses newlines (with surrounding whitespace) to single spaces', () => {
     expect(cell('line one\n  line two\r\n line three')).toBe('line one line two line three');
   });
